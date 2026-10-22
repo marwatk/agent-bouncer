@@ -138,6 +138,7 @@ profiles:
   default:
     unmatched: tunnel            # or deny
     tunnel: [api.anthropic.com]  # passed through even when unmatched: deny
+    allow_private: false         # tunnels may not reach loopback/LAN/metadata (default)
     filters: [filters/redact-response.ts]   # every intercepted request in this profile
     services:
       - name: gitlab
@@ -288,6 +289,11 @@ Read this before relying on bouncer.
   a container or a VM all work. The admin token in `state/admin-token`
   controls sessions and approvals; set `approvals.cli: false` if the agent
   might reach that file.
+* **Tunnels only reach public addresses.** Unmatched traffic can't reach
+  loopback, private, link-local (including cloud metadata), CGNAT or
+  multicast addresses. The check runs on the resolved IP, so DNS tricks
+  don't get around it. Set `allow_private: true` on a profile to lift it.
+  Configured services are unaffected.
 * **Filters are trusted code.** They run in-process with no sandbox, by
   design for v1. Only load filters you'd run yourself.
 * **Scoping has edges.** GraphQL can't be scoped by URL; allowing it opens

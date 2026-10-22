@@ -194,7 +194,8 @@ func TestInjectQuery(t *testing.T) {
 }
 
 func TestTunnelAndUnmatchedDeny(t *testing.T) {
-	e := setup(t, scopedProfile)
+	// The test upstream is on loopback, so reaching it unmatched needs allow_private.
+	e := setup(t, strings.Replace(scopedProfile, "unmatched: tunnel", "unmatched: tunnel\n    allow_private: true", 1))
 	// 127.0.0.1 is not a configured service: tunneled untouched, using the
 	// upstream's own certificate.
 	status, body := e.get(t, "GET", "https://127.0.0.1:"+e.port+"/anything", nil)
@@ -206,6 +207,29 @@ func TestTunnelAndUnmatchedDeny(t *testing.T) {
 	_, err := e2.client.Get("https://127.0.0.1:" + e2.port + "/anything")
 	if err == nil || !strings.Contains(err.Error(), "Forbidden") {
 		t.Fatalf("expected CONNECT to be refused, got %v", err)
+	}
+}
+
+func TestTunnelRefusesNonPublicByDefault(t *testing.T) {
+	e := setup(t, scopedProfile)
+	// CONNECT to loopback is refused with a status, not a dead tunnel.
+	if _, err := e.client.Get("https://127.0.0.1:" + e.port + "/"); err == nil || !strings.Contains(err.Error(), "Forbidden") {
+		t.Fatalf("CONNECT to loopback: %v", err)
+	}
+	// Plain-HTTP forwarding to loopback is refused too.
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "reached") }))
+	defer plain.Close()
+	status, body := e.get(t, "GET", plain.URL+"/", nil)
+	if status != 403 || strings.Contains(body, "reached") {
+		t.Fatalf("plain http to loopback: %d %s", status, body)
+	}
+	for _, ip := range []string{"127.0.0.1", "10.1.2.3", "192.168.1.1", "169.254.169.254", "100.100.1.1", "::1", "fe80::1", "0.0.0.0"} {
+		if !nonPublic(net.ParseIP(ip)) {
+			t.Errorf("%s should be non-public", ip)
+		}
+	}
+	if nonPublic(net.ParseIP("140.82.112.3")) {
+		t.Error("public address flagged")
 	}
 }
 

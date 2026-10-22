@@ -129,6 +129,11 @@ type Profile struct {
 	// Tunnel lists hosts passed through uninspected even when unmatched is
 	// deny (e.g. the agent's own LLM API).
 	Tunnel []string `yaml:"tunnel"`
+	// AllowPrivate lets tunneled (unmatched) traffic reach loopback, private,
+	// link-local and CGNAT addresses. Off by default: otherwise the proxy
+	// would be a way out of the network sandbox it's meant to enforce.
+	// Configured services are not affected.
+	AllowPrivate *bool `yaml:"allow_private"`
 	// Filters run on every intercepted request in this profile, before service filters.
 	Filters  []FilterRef   `yaml:"filters"`
 	Services []*Service    `yaml:"services"`
@@ -617,6 +622,10 @@ func (c *Config) ResolvedProfile(name string) (*Profile, error) {
 	out := &Profile{Name: p.Name, Unmatched: p.Unmatched, Tunnel: append(append([]string{}, parent.Tunnel...), p.Tunnel...)}
 	if out.Unmatched == "" {
 		out.Unmatched = parent.Unmatched
+	}
+	out.AllowPrivate = p.AllowPrivate
+	if out.AllowPrivate == nil {
+		out.AllowPrivate = parent.AllowPrivate
 	}
 	out.Filters = append(append([]FilterRef{}, parent.Filters...), p.Filters...)
 	out.Services = mergeByName(parent.Services, p.Services, func(s *Service) string { return s.Name })
