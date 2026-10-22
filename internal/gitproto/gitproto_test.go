@@ -117,7 +117,16 @@ func TestFromSSHCommand(t *testing.T) {
 	if !ok || info.Service != ServiceUploadPack || info.Repo != "proj" {
 		t.Fatalf("%+v %v", info, ok)
 	}
-	for _, bad := range []string{"git-receive-pack 'a.git'; rm -rf ~", "git-receive-pack a.git && x", "ls", "git-receive-pack 'a'b'"} {
+	info, ok = FromSSHCommand("git-upload-pack '/owner/repo.git'")
+	if !ok || info.Repo != "owner/repo" {
+		t.Fatalf("%+v %v", info, ok)
+	}
+	for _, bad := range []string{
+		"git-receive-pack 'a.git'; rm -rf ~", "git-receive-pack a.git && x", "ls", "git-receive-pack 'a'b'",
+		"git-upload-pack repo\n>/tmp/x", "git-upload-pack 'repo\nx'", "git-upload-pack repo>/tmp/x",
+		"git-upload-pack ~victim/secret", "git-receive-pack 'org/allowed.git/../other'", "git-upload-pack '//x'",
+		" git-upload-pack 'a'", "git-upload-pack  'a'", "git-upload-pack 'a' ", "git-upload-pack 'a*'", "git-upload-pack ''",
+	} {
 		if _, ok := FromSSHCommand(bad); ok {
 			t.Errorf("accepted %q", bad)
 		}

@@ -88,30 +88,38 @@ func FromHTTP(path string, query url.Values) (*Info, bool) {
 	return nil, false
 }
 
-// FromSSHCommand recognizes "git-receive-pack 'group/repo.git'" style exec commands.
+// sshRepoRe is the repository argument git sends, restricted to characters
+// that mean the same thing to every shell and server: no quoting, globbing,
+// expansion, whitespace or control characters.
+var sshRepoRe = regexp.MustCompile(`^/?[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$`)
+
+// FromSSHCommand recognizes the exec command git sends for SSH transports,
+// "git-receive-pack 'group/repo.git'". Anything that deviates (extra
+// whitespace, other quoting, home-relative or dot-segment paths, unusual
+// characters) is not treated as git, so it's subject to exec policy instead
+// of being trusted as a harmless git operation by a remote shell.
 func FromSSHCommand(cmd string) (*Info, bool) {
-	cmd = strings.TrimSpace(cmd)
-	var svc, rest string
+	var svc, arg string
 	for _, s := range []string{ServiceReceivePack, ServiceUploadPack, ServiceUploadArchive} {
 		for _, prefix := range []string{"git-" + s + " ", "git " + s + " "} {
 			if strings.HasPrefix(cmd, prefix) {
-				svc, rest = s, strings.TrimSpace(cmd[len(prefix):])
+				svc, arg = s, cmd[len(prefix):]
 			}
 		}
 	}
 	if svc == "" {
 		return nil, false
 	}
-	// The argument is usually single-quoted by git; anything shell-trickier
-	// than a single quoted or bare word is rejected rather than guessed at.
-	arg := rest
 	if len(arg) >= 2 && arg[0] == '\'' && arg[len(arg)-1] == '\'' {
 		arg = arg[1 : len(arg)-1]
-		if strings.ContainsRune(arg, '\'') {
+	}
+	if !sshRepoRe.MatchString(arg) {
+		return nil, false
+	}
+	for _, seg := range strings.Split(strings.TrimPrefix(arg, "/"), "/") {
+		if seg == "." || seg == ".." {
 			return nil, false
 		}
-	} else if strings.ContainsAny(arg, " \t'\"\\;&|$`") {
-		return nil, false
 	}
 	return &Info{Service: svc, Repo: cleanRepo(arg)}, true
 }
