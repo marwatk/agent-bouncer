@@ -60,21 +60,28 @@ profiles:
             config: {branches: [main, "release/*"]}
           - filters/require-approval-merge.ts
         # First matching rule wins; with rules present the default is deny.
-        # gitlab_project scopes WHICH project; the deny rules first limit
-        # WHAT the agent may do inside it.
+        # gitlab_project scopes WHICH project; subpaths limit WHAT the agent
+        # may do there. This is an allowlist: endpoints not listed (CI
+        # variables, members, tokens, webhooks, settings, deleting the
+        # project...) are denied, including ones GitLab adds later.
         rules:
-          - action: deny
-            reason: CI secrets, membership, tokens and webhooks are off-limits
+          - action: allow
+            methods: [GET]
+            gitlab_project: {path: mygroup/myproject, subpaths: [""]}   # project info
+          - action: allow
             gitlab_project:
               path: mygroup/myproject
-              subpaths: ["variables/**", "members/**", "share/**", "access_tokens/**",
-                         "deploy_tokens/**", "deploy_keys/**", "hooks/**", "transfer", "fork"]
-          - action: deny
-            reason: the agent may not delete, rename or reconfigure the project
-            methods: [PUT, DELETE, POST]
-            gitlab_project: {path: mygroup/myproject, subpaths: ["", "archive", "unarchive"]}
+              subpaths: ["issues/**", "merge_requests/**", "pipelines/**", "pipeline",
+                         "jobs/**", "labels/**", "milestones/**", "releases/**", "search"]
+          # Repository contents: read via the API, write only via git push,
+          # where the branch filters above apply. (The commit and files APIs
+          # can put commits on main without a push.)
           - action: allow
-            gitlab_project: mygroup/myproject   # REST API (path or numeric ID) and git
+            methods: [GET]
+            gitlab_project: {path: mygroup/myproject, subpaths: ["repository/**"]}
+          - action: allow
+            git: {}
+            gitlab_project: mygroup/myproject   # clone, fetch, push
           - action: allow
             methods: [GET]
             path: /api/v4/user                  # tools call this to check auth

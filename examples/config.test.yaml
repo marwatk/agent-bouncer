@@ -17,7 +17,6 @@ cases:
   - name: CI variables of the in-scope project are still off-limits
     request: {url: "https://gitlab.com/api/v4/projects/1234/variables"}
     expect: deny
-    expect_reason: CI secrets
   - name: adding members is off-limits
     request: {method: POST, url: "https://gitlab.com/api/v4/projects/mygroup%2Fmyproject/members", body: "{}"}
     expect: deny
@@ -32,6 +31,15 @@ cases:
     expect: allow
   - name: group APIs are out of scope
     request: {url: "https://gitlab.com/api/v4/groups/mygroup/projects"}
+    expect: deny
+  - name: committing to main through the files API is not allowed
+    request: {method: POST, url: "https://gitlab.com/api/v4/projects/1234/repository/files/README.md", body: '{"branch":"main"}'}
+    expect: deny
+  - name: reading files through the API is fine
+    request: {url: "https://gitlab.com/api/v4/projects/1234/repository/files/README.md?ref=main"}
+    expect: allow
+  - name: unlisted project settings are denied
+    request: {method: PUT, url: "https://gitlab.com/api/v4/projects/1234/protected_branches/main", body: "{}"}
     expect: deny
   - name: whoami
     request: {url: "https://gitlab.com/api/v4/user"}

@@ -154,9 +154,10 @@ profiles:
           - path: filters/git-protect-branches.ts
             config: {branches: [main, "release/*"]}
         rules:                              # first match wins
-          - action: deny
-            gitlab_project: {path: mygroup/myproject, subpaths: ["variables/**", "members/**"]}
-          - action: allow
+          - action: allow                   # an allowlist of endpoints in the project...
+            gitlab_project: {path: mygroup/myproject, subpaths: ["issues/**", "merge_requests/**"]}
+          - action: allow                   # ...plus git, where branch filters apply
+            git: {}
             gitlab_project: mygroup/myproject
         # default: deny when rules exist, allow otherwise
     ssh:
@@ -315,8 +316,11 @@ Read this before relying on bouncer.
   design for v1. Only load filters you'd run yourself.
 * **Scoping has edges.** GraphQL can't be scoped by URL; allowing it opens
   everything the token can reach (the GraphQL guard limits *what*, not
-  *where*). `gitlab_project` scopes *which* project; use `subpaths` rules to
-  limit what the agent may do inside it. Push rejection only sees ref names,
+  *where*). `gitlab_project` scopes *which* project; use `subpaths` to limit
+  what the agent may do inside it, and prefer allowlists, since a denylist
+  misses endpoints. Git filters only see git pushes, so keep API commit
+  endpoints (`repository/files`, `repository/commits`) out of the allowlist
+  if branch protection matters. Push rejection only sees ref names,
   not history, so it can't tell a force push from a normal one.
 * **The CA can impersonate any site.** `bouncer ca install` makes the
   bouncer CA a trusted root for your user (browsers included), and its key
