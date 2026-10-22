@@ -169,9 +169,9 @@ func (s *Service) DefaultAction() string {
 }
 
 // Inject describes how the credential is attached to upstream requests.
-// With no inject block, bouncer replaces the credential's placeholder where
-// it appears in authentication headers (Authorization, including Basic, and
-// headers named like *token*, *key*, *auth*, *secret*).
+// Bouncer always replaces the credential's placeholder where it appears in
+// Authorization (including inside Basic), Private-Token, the inject header,
+// and any placeholder_headers; then it applies the inject spec, if any.
 type Inject struct {
 	// Header and Value set a header; "{{secret}}" in Value is replaced. Value defaults to "{{secret}}".
 	Header string `yaml:"header"`
@@ -182,6 +182,9 @@ type Inject struct {
 	Basic *BasicInject `yaml:"basic"`
 	// Query sets a query parameter to the secret, for APIs that require it.
 	Query string `yaml:"query"`
+	// PlaceholderHeaders adds headers (beyond Authorization, Private-Token and
+	// Header) in which the agent's placeholder is replaced with the secret.
+	PlaceholderHeaders []string `yaml:"placeholder_headers"`
 	// Git overrides injection for git smart-HTTP requests, which usually
 	// need Basic auth even where the API takes a token header.
 	Git *Inject `yaml:"git"`

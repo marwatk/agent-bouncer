@@ -57,7 +57,7 @@ func setup(t *testing.T, profileYAML string) *env {
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
-		fmt.Fprintf(w, "auth=%s private=%s path=%s query=%s body=%s", r.Header.Get("Authorization"), r.Header.Get("Private-Token"), r.URL.EscapedPath(), r.URL.RawQuery, body)
+		fmt.Fprintf(w, "widget=%s auth=%s private=%s path=%s query=%s body=%s", r.Header.Get("X-Widget-Key"), r.Header.Get("Authorization"), r.Header.Get("Private-Token"), r.URL.EscapedPath(), r.URL.RawQuery, body)
 	}))
 	t.Cleanup(e.upstream.Close)
 	_, e.port, _ = net.SplitHostPort(e.upstream.Listener.Addr().String())
@@ -168,14 +168,14 @@ func TestPlaceholderReplacement(t *testing.T) {
 	base := "https://localhost:" + e.port
 	ph := config.Placeholder("tok")
 	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("oauth2:"+ph))
-	_, body := e.get(t, "GET", base+"/x?title="+ph, map[string]string{"Authorization": basic, "Private-Token": ph})
+	_, body := e.get(t, "GET", base+"/x?title="+ph, map[string]string{"Authorization": basic, "Private-Token": ph, "X-Widget-Key": ph})
 	wantBasic := "Basic " + base64.StdEncoding.EncodeToString([]byte("oauth2:real-secret"))
 	if !strings.Contains(body, "auth="+wantBasic) || !strings.Contains(body, "private=real-secret") {
 		t.Fatalf("auth header placeholders not replaced: %s", body)
 	}
 	// A placeholder anywhere an API might store and echo it back must stay a
 	// placeholder, or the agent could read the secret out of, say, an issue title.
-	if !strings.Contains(body, "query=title="+ph) || strings.Count(body, "real-secret") != 1 {
+	if !strings.Contains(body, "query=title="+ph) || !strings.Contains(body, "widget="+ph) || strings.Count(body, "real-secret") != 1 {
 		t.Fatalf("placeholder replaced outside auth headers: %s", body)
 	}
 }

@@ -126,11 +126,15 @@ in a container. Mark a credential `source: provided` to require it from
 `header` + `value` (with `{{secret}}`), or `query: param`. `inject.git`
 overrides this for git smart-HTTP, which usually needs Basic auth even when
 the API takes a token header. Credentials are never sent over plain HTTP
-unless the service sets `insecure: true` (for local development only). Without `inject`, bouncer swaps the
-credential's placeholder (`bouncer-placeholder-<name>`) for the real secret,
-but only inside authentication headers. That restriction is deliberate: an
-API that stores and echoes back other fields (an issue title, say) would
-otherwise hand the secret to the agent.
+unless the service sets `insecure: true` (for local development only).
+
+Bouncer also swaps the credential's placeholder (`bouncer-placeholder-<name>`)
+for the real secret, so tools that must send a token themselves keep
+working. The swap happens only in `Authorization` (Basic included),
+`Private-Token`, `inject.header` and headers listed in
+`inject.placeholder_headers`. That restriction is deliberate: an API that
+stores and echoes back other fields (an issue title, say) would otherwise
+hand the secret to the agent.
 
 ## Policy
 
