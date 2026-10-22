@@ -2,6 +2,7 @@ package chain
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
@@ -193,6 +194,16 @@ func TestGraphQLRule(t *testing.T) {
 	req = httpReq(t, "POST", "https://api.github.com/graphql", []byte(`{"query":"{ viewer { login } }"}`))
 	if resp, _ := h(req); resp.Denial != nil {
 		t.Errorf("query denied: %+v", resp.Denial)
+	}
+	// Gzip-encoded bodies are inspected after decoding.
+	var zb bytes.Buffer
+	zw := gzip.NewWriter(&zb)
+	zw.Write([]byte(`{"query":"mutation { deleteRepository(input:{}) { clientMutationId } }"}`))
+	zw.Close()
+	req = httpReq(t, "POST", "https://api.github.com/graphql", zb.Bytes())
+	req.Header.Set("Content-Encoding", "gzip")
+	if resp, _ := h(req); resp.Denial == nil || !strings.Contains(resp.Denial.Reason, "denied by") {
+		t.Errorf("gzip mutation not caught by the rule: %+v", resp.Denial)
 	}
 }
 

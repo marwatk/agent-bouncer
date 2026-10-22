@@ -3,6 +3,7 @@
 package gql
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,6 +98,9 @@ func FromHTTP(method string, query url.Values, header http.Header, body []byte) 
 	type payload struct {
 		Query string `json:"query"`
 	}
+	if err := noDuplicateKeys(body); err != nil {
+		return nil, err
+	}
 	var docs []payload
 	if strings.HasPrefix(trimmed, "[") {
 		if err := json.Unmarshal(body, &docs); err != nil {
@@ -122,4 +126,53 @@ func FromHTTP(method string, query url.Values, header http.Header, body []byte) 
 		all = append(all, ops...)
 	}
 	return all, nil
+}
+
+// noDuplicateKeys rejects a request object (or batch of them) that repeats a
+// top-level key. JSON parsers disagree on which duplicate wins, so the
+// operation bouncer inspects could differ from the one the server runs.
+func noDuplicateKeys(body []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("graphql: body: %w", err)
+	}
+	checkObject := func() error {
+		seen := map[string]bool{}
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return fmt.Errorf("graphql: body: %w", err)
+			}
+			k, _ := kt.(string)
+			if seen[k] {
+				return fmt.Errorf("graphql: duplicate %q key in request body", k)
+			}
+			seen[k] = true
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return fmt.Errorf("graphql: body: %w", err)
+			}
+		}
+		_, err := dec.Token() // closing brace
+		return err
+	}
+	switch tok {
+	case json.Delim('{'):
+		return checkObject()
+	case json.Delim('['):
+		for dec.More() {
+			t, err := dec.Token()
+			if err != nil {
+				return fmt.Errorf("graphql: body: %w", err)
+			}
+			if t != json.Delim('{') {
+				return errors.New("graphql: batch entries must be objects")
+			}
+			if err := checkObject(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

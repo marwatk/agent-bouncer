@@ -34,3 +34,18 @@ func TestFromHTTPBatch(t *testing.T) {
 		t.Fatal("persisted query should error")
 	}
 }
+
+func TestDuplicateQueryKeyRejected(t *testing.T) {
+	h := http.Header{"Content-Type": {"application/json"}}
+	for _, body := range []string{
+		`{"query":"{ viewer { login } }","query":"mutation { deleteRepository(input:{}) { clientMutationId } }"}`,
+		`[{"query":"{ a }"},{"query":"{ b }","query":"{ c }"}]`,
+	} {
+		if _, err := FromHTTP("POST", nil, h, []byte(body)); err == nil {
+			t.Errorf("accepted duplicate keys: %s", body)
+		}
+	}
+	if _, err := FromHTTP("POST", nil, h, []byte(`{"query":"{ a }","variables":{"query":"x","query2":"y"}}`)); err != nil {
+		t.Errorf("nested keys are fine: %v", err)
+	}
+}

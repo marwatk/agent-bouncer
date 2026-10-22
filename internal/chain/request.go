@@ -3,6 +3,7 @@
 package chain
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -190,10 +191,32 @@ func (r *Request) GraphQL() ([]gql.Operation, error) {
 			if r.gqlErr != nil {
 				return
 			}
+			if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+				body, r.gqlErr = gunzip(body)
+				if r.gqlErr != nil {
+					return
+				}
+			}
 		}
 		r.gqlOps, r.gqlErr = gql.FromHTTP(r.Method, r.URL.Query(), r.Header, body)
 	})
 	return r.gqlOps, r.gqlErr
+}
+
+// gunzip decodes a gzip body, bounded like any inspected body.
+func gunzip(b []byte) ([]byte, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, fmt.Errorf("gzip body: %w", err)
+	}
+	out, err := io.ReadAll(io.LimitReader(zr, MaxBuffer+1))
+	if err != nil {
+		return nil, fmt.Errorf("gzip body: %w", err)
+	}
+	if len(out) > MaxBuffer {
+		return nil, ErrTooLarge
+	}
+	return out, nil
 }
 
 // Describe is a short human description, used in prompts and logs.
