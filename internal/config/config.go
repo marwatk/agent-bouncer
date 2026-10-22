@@ -148,6 +148,10 @@ type Service struct {
 	Hosts []string `yaml:"hosts"`
 	// Credential to inject (optional; a service with no credential is still filtered).
 	Credential string `yaml:"credential"`
+	// AllowUpgrade permits protocol upgrades (WebSockets) on a credentialed
+	// service. After the upgrade, traffic is a raw stream that filters never
+	// see, authenticated by the injected credential.
+	AllowUpgrade bool `yaml:"allow_upgrade"`
 	// Insecure allows injecting the credential into plain-HTTP requests.
 	// Only for local development; never set it for a remote host.
 	Insecure bool    `yaml:"insecure"`

@@ -304,6 +304,20 @@ func TestReverseMode(t *testing.T) {
 	}
 }
 
+func TestUpgradeRefusedOnCredentialedService(t *testing.T) {
+	e := setup(t, `
+  p:
+    services:
+      - name: api
+        hosts: [localhost]
+        credential: tok
+`)
+	status, body := e.get(t, "GET", "https://localhost:"+e.port+"/upgrade", map[string]string{"Connection": "Upgrade", "Upgrade": "echo"})
+	if status != 403 || !strings.Contains(body, "allow_upgrade") {
+		t.Fatalf("%d %s", status, body)
+	}
+}
+
 func TestUpgradePassthrough(t *testing.T) {
 	e := setup(t, `
   p:

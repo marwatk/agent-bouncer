@@ -319,6 +319,9 @@ Read this before relying on bouncer.
   Windows, Unix file modes don't apply, so check its ACLs. If the key leaks,
   delete `ca.pem`/`ca-key.pem`, restart, and reinstall. The SSH CA is only
   trusted for the configured SSH hosts.
+* **Upgraded connections aren't filtered.** After a WebSocket upgrade the
+  stream is raw, so credentialed services refuse upgrades unless they set
+  `allow_upgrade: true`.
 * **Interception is HTTP/1.1 to the client.** Upstream connections use
   HTTP/2 where available. Apps that pin certificates won't work through
   interception; tunnel them or leave them out.
