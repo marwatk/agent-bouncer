@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -107,6 +108,12 @@ func (r *Request) Git() *gitproto.Info {
 		case TransportHTTP:
 			if r.URL != nil {
 				r.git, _ = gitproto.FromHTTP(r.URL.Path, r.URL.Query())
+				// A push body is a push wherever it's sent: servers may route
+				// URL shapes we don't recognize, and ref policy must still run.
+				if r.isPushContent() && (r.git == nil || r.git.Service != gitproto.ServiceReceivePack) {
+					repo := strings.TrimSuffix(strings.TrimRight(r.URL.Path, "/"), "/git-receive-pack")
+					r.git = &gitproto.Info{Service: gitproto.ServiceReceivePack, Repo: strings.TrimSuffix(strings.Trim(repo, "/"), ".git")}
+				}
 			}
 		case TransportSSH:
 			if r.SSH != nil && r.SSH.Command != "" {
@@ -126,7 +133,7 @@ func (r *Request) Push() (*gitproto.Push, error) {
 		return nil, nil
 	}
 	r.pushOnce.Do(func() {
-		if r.Transport == TransportHTTP && !strings.HasSuffix(r.URL.Path, "/git-receive-pack") {
+		if r.Transport == TransportHTTP && !r.IsPushRequest() {
 			r.push = &gitproto.Push{}
 			return
 		}
@@ -146,6 +153,23 @@ func (r *Request) Push() (*gitproto.Push, error) {
 		r.push, r.pushErr = gitproto.ParsePush(src)
 	})
 	return r.push, r.pushErr
+}
+
+func (r *Request) isPushContent() bool {
+	if r.Header == nil {
+		return false
+	}
+	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return ct == gitproto.PushContentType
+}
+
+// IsPushRequest reports whether an HTTP request carries push commands (as
+// opposed to the ref advertisement that precedes a push).
+func (r *Request) IsPushRequest() bool {
+	if r.Transport != TransportHTTP || r.Method != http.MethodPost || r.URL == nil {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimRight(r.URL.Path, "/"), "/git-receive-pack") || r.isPushContent()
 }
 
 // GraphQL summarizes the GraphQL operations in the request, or returns nil

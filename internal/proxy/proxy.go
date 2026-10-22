@@ -373,7 +373,7 @@ func (s *Server) intercept(w http.ResponseWriter, r *http.Request, sess *chain.S
 // pushRejection renders a denied git push as a receive-pack result, which
 // git displays far better than an HTTP error.
 func pushRejection(req *chain.Request, d *chain.Denial) []byte {
-	if req.Method != http.MethodPost || !strings.HasSuffix(req.URL.Path, "/git-receive-pack") {
+	if !req.IsPushRequest() {
 		return nil
 	}
 	push, err := req.Push()

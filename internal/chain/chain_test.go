@@ -156,6 +156,15 @@ func TestGitPushRefRule(t *testing.T) {
 			t.Errorf("%s: body altered by inspection", c.name)
 		}
 	}
+	// Unusual URL shapes carrying a push body are still parsed as pushes.
+	main := push(gitproto.RefUpdate{OldOID: a, NewOID: b, Ref: "refs/heads/main"})
+	for _, u := range []string{"https://gitlab.com/g/p.git/git-receive-pack/", "https://gitlab.com/g/p/some-other-route"} {
+		req := httpReq(t, "POST", u, main)
+		req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+		if resp, _ := h(req); resp.Denial == nil {
+			t.Errorf("%s: push to main allowed", u)
+		}
+	}
 	// Ref advertisement for a push carries no commands and is allowed.
 	resp, _ := h(httpReq(t, "GET", "https://gitlab.com/g/p.git/info/refs?service=git-receive-pack", nil))
 	if resp.Denial != nil {

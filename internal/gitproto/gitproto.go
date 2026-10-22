@@ -59,8 +59,12 @@ type Info struct {
 	Repo string `json:"repo"`
 }
 
+// PushContentType is the request content type of a smart-HTTP push.
+const PushContentType = "application/x-git-receive-pack-request"
+
 // FromHTTP recognizes git smart-HTTP and LFS requests from a decoded URL path and query.
 func FromHTTP(path string, query url.Values) (*Info, bool) {
+	path = strings.TrimRight(path, "/")
 	svcFromQuery := func() string {
 		return strings.TrimPrefix(query.Get("service"), "git-")
 	}
