@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,9 @@ type Options struct {
 	// for display (they are always written to the audit log too).
 	Logf     func(format string, args ...any)
 	Decision func(audit.Entry)
+	// Provided are secrets supplied at startup (--creds-from). They override
+	// configured sources and are held only in memory.
+	Provided map[string]string
 }
 
 // Daemon is a running bouncer.
@@ -69,7 +73,11 @@ type SessionRecord struct {
 	chain.Session
 	Token   string    `json:"token"`
 	Created time.Time `json:"created"`
+	// Expires is zero for sessions that last until revoked.
+	Expires time.Time `json:"expires,omitzero"`
 }
+
+func (s *SessionRecord) expired() bool { return !s.Expires.IsZero() && time.Now().After(s.Expires) }
 
 // NewSession is the control API's reply to session creation: everything a
 // client needs to build the agent's environment without parsing the config.
@@ -79,6 +87,9 @@ type NewSession struct {
 	SSHAddr   string `json:"ssh_addr"`
 	// Placeholders maps environment variable names to placeholder values.
 	Placeholders map[string]string `json:"placeholders"`
+	// SSHHosts lists every configured SSH service host pattern, the only
+	// hosts the generated known_hosts trusts the bouncer SSH CA for.
+	SSHHosts []string `json:"ssh_hosts"`
 }
 
 // Runtime describes a running daemon; written to the state dir so clients
@@ -142,6 +153,7 @@ func New(opts Options) (*Daemon, error) {
 	}
 	creds.ConfigureBitwarden(opts.StateDir, opts.Logf)
 	d.creds = creds.NewStore(cfg.Credentials)
+	d.creds.SetProvided(opts.Provided)
 	if err := d.apply(cfg); err != nil {
 		return nil, err
 	}
@@ -156,7 +168,45 @@ func (d *Daemon) Config() *config.Config {
 	return d.cfg
 }
 
+// checkProvided ensures startup-provided secrets and the config agree:
+// every provided name is a configured credential, and every source:
+// provided credential has a value.
+func (d *Daemon) checkProvided(cfg *config.Config) error {
+	var unknown, missing []string
+	for name := range d.opts.Provided {
+		if _, ok := cfg.Credentials[name]; !ok {
+			unknown = append(unknown, name)
+		}
+	}
+	for name, c := range cfg.Credentials {
+		if _, ok := d.opts.Provided[name]; c.Source == "provided" && !ok {
+			missing = append(missing, name)
+		}
+	}
+	// "a: x" + "b: y" printed without a newline between them parses as a
+	// single value for a; catch it when b is a configured name.
+	for name, v := range d.opts.Provided {
+		for other := range cfg.Credentials {
+			if other != name && strings.Contains(v, other+": ") {
+				return fmt.Errorf("--creds-from value for %s contains %q; is a newline missing between entries?", name, other+": ")
+			}
+		}
+	}
+	sort.Strings(unknown)
+	sort.Strings(missing)
+	switch {
+	case len(unknown) > 0:
+		return fmt.Errorf("--creds-from names credentials not in the config: %s", strings.Join(unknown, ", "))
+	case len(missing) > 0:
+		return fmt.Errorf("credentials with source: provided have no value from --creds-from: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 func (d *Daemon) apply(cfg *config.Config) error {
+	if err := d.checkProvided(cfg); err != nil {
+		return err
+	}
 	set, err := policy.Compile(cfg, d.env, d.kv)
 	if err != nil {
 		return err
@@ -170,7 +220,7 @@ func (d *Daemon) apply(cfg *config.Config) error {
 	d.Approvals.SetTimeout(cfg.Approvals.TimeoutOrDefault())
 	if cfg.Approvals.NotifyEnabled() {
 		d.Approvals.Notify = func(p approval.Pending) {
-			notify.Send("agent-bouncer: approval needed", p.Prompt+"\n"+p.Request)
+			notify.Send("agent-bouncer: approval needed", approval.Display(p.Prompt, 150)+"\n"+approval.Display(p.Request, 150))
 		}
 	} else {
 		d.Approvals.Notify = nil
@@ -207,10 +257,10 @@ func (d *Daemon) Session(token string) (*chain.Session, bool) {
 		if d.cfg.AnonymousProfile == "" {
 			return nil, false
 		}
-		return &chain.Session{ID: "anonymous", Label: "anonymous", Profile: d.cfg.AnonymousProfile}, true
+		return &chain.Session{ID: "anonymous", Label: "anonymous", Profile: d.cfg.AnonymousProfile, Shared: true}, true
 	}
 	s, ok := d.sessions[token]
-	if !ok {
+	if !ok || s.expired() {
 		return nil, false
 	}
 	sess := s.Session
@@ -226,7 +276,8 @@ func (d *Daemon) Profile(name string) (*policy.Profile, bool) {
 }
 
 // CreateSession registers a new agent session.
-func (d *Daemon) CreateSession(profile, label string) (*SessionRecord, error) {
+// A ttl of 0 means the session lasts until revoked.
+func (d *Daemon) CreateSession(profile, label string, ttl time.Duration) (*SessionRecord, error) {
 	d.mu.Lock()
 	if profile == "" {
 		profile = d.cfg.DefaultProfile
@@ -239,7 +290,15 @@ func (d *Daemon) CreateSession(profile, label string) (*SessionRecord, error) {
 		d.mu.Unlock()
 		return nil, fmt.Errorf("unknown profile %q", profile)
 	}
-	rec := &SessionRecord{Session: chain.Session{ID: randHex(4), Label: label, Profile: profile}, Token: randHex(24), Created: time.Now()}
+	rec := &SessionRecord{Session: chain.Session{ID: randHex(8), Label: label, Profile: profile}, Token: randHex(24), Created: time.Now()}
+	if ttl > 0 {
+		rec.Expires = rec.Created.Add(ttl)
+	}
+	for tok, s := range d.sessions {
+		if s.expired() {
+			delete(d.sessions, tok)
+		}
+	}
 	if rec.Label == "" {
 		rec.Label = rec.ID
 	}
@@ -257,6 +316,24 @@ func (d *Daemon) Placeholders() map[string]string {
 			out[k] = c.Placeholder()
 		}
 	}
+	return out
+}
+
+// SSHHosts lists the host patterns of every configured SSH service.
+func (d *Daemon) SSHHosts() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range d.Config().Profiles {
+		for _, s := range p.SSH {
+			for _, h := range s.Hosts {
+				if !seen[h] {
+					seen[h] = true
+					out = append(out, h)
+				}
+			}
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -283,6 +360,9 @@ func (d *Daemon) listSessions() []SessionRecord {
 	defer d.mu.RUnlock()
 	out := make([]SessionRecord, 0, len(d.sessions))
 	for _, s := range d.sessions {
+		if s.expired() {
+			continue
+		}
 		r := *s
 		r.Token = ""
 		out = append(out, r)

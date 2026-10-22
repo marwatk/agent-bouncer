@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -84,7 +85,9 @@ func (a Approvals) TimeoutOrDefault() time.Duration {
 // Credential describes where a secret comes from. The agent never sees it;
 // it only sees the placeholder.
 type Credential struct {
-	// Source is one of: keyring, command, env, file, ssh-agent, bitwarden.
+	// Source is one of: keyring, command, env, file, ssh-agent, bitwarden, provided.
+	// "provided" values come from `bouncer serve --creds-from`, which can
+	// also override any other source.
 	Source string `yaml:"source"`
 	// Command (source: command) is an argv run to fetch the secret, e.g.
 	// ["bw", "get", "password", "gitlab"]. Stdout, minus trailing newlines, is the secret.
@@ -151,6 +154,11 @@ type Profile struct {
 	// Tunnel lists hosts passed through uninspected even when unmatched is
 	// deny (e.g. the agent's own LLM API).
 	Tunnel []string `yaml:"tunnel"`
+	// AllowPrivate lets tunneled (unmatched) traffic reach loopback, private,
+	// link-local and CGNAT addresses. Off by default: otherwise the proxy
+	// would be a way out of the network sandbox it's meant to enforce.
+	// Configured services are not affected.
+	AllowPrivate *bool `yaml:"allow_private"`
 	// Filters run on every intercepted request in this profile, before service filters.
 	Filters  []FilterRef   `yaml:"filters"`
 	Services []*Service    `yaml:"services"`
@@ -164,8 +172,15 @@ type Service struct {
 	Name  string   `yaml:"name"`
 	Hosts []string `yaml:"hosts"`
 	// Credential to inject (optional; a service with no credential is still filtered).
-	Credential string  `yaml:"credential"`
-	Inject     *Inject `yaml:"inject"`
+	Credential string `yaml:"credential"`
+	// AllowUpgrade permits protocol upgrades (WebSockets) on a credentialed
+	// service. After the upgrade, traffic is a raw stream that filters never
+	// see, authenticated by the injected credential.
+	AllowUpgrade bool `yaml:"allow_upgrade"`
+	// Insecure allows injecting the credential into plain-HTTP requests.
+	// Only for local development; never set it for a remote host.
+	Insecure bool    `yaml:"insecure"`
+	Inject   *Inject `yaml:"inject"`
 	// Default action when no rule matches. If omitted: deny when rules exist, allow otherwise.
 	Default string      `yaml:"default"`
 	Rules   []Rule      `yaml:"rules"`
@@ -183,9 +198,9 @@ func (s *Service) DefaultAction() string {
 }
 
 // Inject describes how the credential is attached to upstream requests.
-// With no inject block, bouncer replaces the credential's placeholder where
-// it appears in authentication headers (Authorization, including Basic, and
-// headers named like *token*, *key*, *auth*, *secret*).
+// Bouncer always replaces the credential's placeholder where it appears in
+// Authorization (including inside Basic), Private-Token, the inject header,
+// and any placeholder_headers; then it applies the inject spec, if any.
 type Inject struct {
 	// Header and Value set a header; "{{secret}}" in Value is replaced. Value defaults to "{{secret}}".
 	Header string `yaml:"header"`
@@ -196,6 +211,9 @@ type Inject struct {
 	Basic *BasicInject `yaml:"basic"`
 	// Query sets a query parameter to the secret, for APIs that require it.
 	Query string `yaml:"query"`
+	// PlaceholderHeaders adds headers (beyond Authorization, Private-Token and
+	// Header) in which the agent's placeholder is replaced with the secret.
+	PlaceholderHeaders []string `yaml:"placeholder_headers"`
 	// Git overrides injection for git smart-HTTP requests, which usually
 	// need Basic auth even where the API takes a token header.
 	Git *Inject `yaml:"git"`
@@ -226,6 +244,9 @@ type SSHService struct {
 	Allow []string `yaml:"allow"`
 	// KnownHosts files used to verify the upstream host key. Default ~/.ssh/known_hosts.
 	KnownHosts []string `yaml:"known_hosts"`
+	// Env lists environment variables the agent may set on the upstream
+	// session (a trailing * matches a prefix). Default: GIT_PROTOCOL, LANG, LC_*.
+	Env []string `yaml:"env"`
 	// HostKey optionally pins the upstream host key (authorized_keys format).
 	HostKey string      `yaml:"host_key"`
 	Default string      `yaml:"default"`
@@ -241,6 +262,20 @@ func (s *SSHService) DefaultAction() string {
 		return ActionDeny
 	}
 	return ActionAllow
+}
+
+// EnvAllowed reports whether the agent may set an environment variable.
+func (s *SSHService) EnvAllowed(name string) bool {
+	allow := s.Env
+	if allow == nil {
+		allow = []string{"GIT_PROTOCOL", "LANG", "LC_*"}
+	}
+	for _, a := range allow {
+		if a == name || (strings.HasSuffix(a, "*") && strings.HasPrefix(name, a[:len(a)-1])) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *SSHService) Allows(kind string) bool {
@@ -403,7 +438,7 @@ func (c *Config) normalize() error {
 			return fmt.Errorf("credential %q: bitwarden block requires source bitwarden", name)
 		}
 		switch cr.Source {
-		case "keyring", "ssh-agent":
+		case "keyring", "ssh-agent", "provided":
 		case "command":
 			if len(cr.Command) == 0 {
 				return fmt.Errorf("credential %q: source command requires command", name)
@@ -425,7 +460,7 @@ func (c *Config) normalize() error {
 				cr.Bitwarden.Field = "password"
 			}
 		default:
-			return fmt.Errorf("credential %q: unknown source %q (want keyring, command, env, file, ssh-agent, bitwarden)", name, cr.Source)
+			return fmt.Errorf("credential %q: unknown source %q (want keyring, command, env, file, ssh-agent, bitwarden, provided)", name, cr.Source)
 		}
 	}
 	for name, p := range c.Profiles {
@@ -463,6 +498,10 @@ func (c *Config) normalize() error {
 	if c.AnonymousProfile != "" {
 		if _, ok := c.Profiles[c.AnonymousProfile]; !ok {
 			return fmt.Errorf("anonymous_profile %q does not exist", c.AnonymousProfile)
+		}
+		// Tokenless access is only tolerable when only this machine can connect.
+		if !loopback(c.Listen) {
+			return fmt.Errorf("anonymous_profile requires a loopback listen address, got %q: anyone who can reach the proxy would get that profile's credentials", c.Listen)
 		}
 	}
 	return nil
@@ -632,6 +671,15 @@ func normalizeRules(rules []Rule) error {
 	return nil
 }
 
+func loopback(addr string) bool {
+	host, _ := SplitHostPort(addr)
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // ResolvedProfile returns a profile with its extends chain flattened: parent
 // filters first, and services/ssh entries overridden by name in the child.
 func (c *Config) ResolvedProfile(name string) (*Profile, error) {
@@ -649,6 +697,10 @@ func (c *Config) ResolvedProfile(name string) (*Profile, error) {
 	out := &Profile{Name: p.Name, Unmatched: p.Unmatched, Tunnel: append(append([]string{}, parent.Tunnel...), p.Tunnel...)}
 	if out.Unmatched == "" {
 		out.Unmatched = parent.Unmatched
+	}
+	out.AllowPrivate = p.AllowPrivate
+	if out.AllowPrivate == nil {
+		out.AllowPrivate = parent.AllowPrivate
 	}
 	out.Filters = append(append([]FilterRef{}, parent.Filters...), p.Filters...)
 	out.Services = mergeByName(parent.Services, p.Services, func(s *Service) string { return s.Name })

@@ -117,7 +117,16 @@ func TestFromSSHCommand(t *testing.T) {
 	if !ok || info.Service != ServiceUploadPack || info.Repo != "proj" {
 		t.Fatalf("%+v %v", info, ok)
 	}
-	for _, bad := range []string{"git-receive-pack 'a.git'; rm -rf ~", "git-receive-pack a.git && x", "ls", "git-receive-pack 'a'b'"} {
+	info, ok = FromSSHCommand("git-upload-pack '/owner/repo.git'")
+	if !ok || info.Repo != "owner/repo" {
+		t.Fatalf("%+v %v", info, ok)
+	}
+	for _, bad := range []string{
+		"git-receive-pack 'a.git'; rm -rf ~", "git-receive-pack a.git && x", "ls", "git-receive-pack 'a'b'",
+		"git-upload-pack repo\n>/tmp/x", "git-upload-pack 'repo\nx'", "git-upload-pack repo>/tmp/x",
+		"git-upload-pack ~victim/secret", "git-receive-pack 'org/allowed.git/../other'", "git-upload-pack '//x'",
+		" git-upload-pack 'a'", "git-upload-pack  'a'", "git-upload-pack 'a' ", "git-upload-pack 'a*'", "git-upload-pack ''",
+	} {
 		if _, ok := FromSSHCommand(bad); ok {
 			t.Errorf("accepted %q", bad)
 		}
@@ -147,5 +156,33 @@ func TestRejectPushSideband(t *testing.T) {
 	}
 	if RejectPush(&Push{Updates: p.Updates}, "x") != nil {
 		t.Fatal("no report-status capability should yield nil")
+	}
+}
+
+// Capabilities attach to the first command even when shallow lines come first.
+func TestParsePushShallowBeforeCommands(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write(EncodePkt("shallow " + a + "\n"))
+	buf.Write(EncodePkt(a + " " + b + " refs/heads/main\x00report-status side-band-64k\n"))
+	buf.Write(Flush)
+	p, err := ParsePush(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Updates) != 1 || p.Updates[0].Ref != "refs/heads/main" || !p.HasCapability("report-status") {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestParsePushRejectsInvalidRefNames(t *testing.T) {
+	for _, ref := range []string{"refs/heads/main\x00x", "refs/heads/a b", "refs/heads/a..b", "main", "refs/heads/x\n0000"} {
+		// The second command: on the first, a NUL legitimately starts the capability list.
+		var buf bytes.Buffer
+		buf.Write(EncodePkt(a + " " + b + " refs/heads/ok\x00report-status\n"))
+		buf.Write(EncodePkt(a + " " + b + " " + ref + "\n"))
+		buf.Write(Flush)
+		if _, err := ParsePush(&buf); err == nil {
+			t.Errorf("accepted ref %q", ref)
+		}
 	}
 }

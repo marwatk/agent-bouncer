@@ -59,8 +59,12 @@ type Info struct {
 	Repo string `json:"repo"`
 }
 
+// PushContentType is the request content type of a smart-HTTP push.
+const PushContentType = "application/x-git-receive-pack-request"
+
 // FromHTTP recognizes git smart-HTTP and LFS requests from a decoded URL path and query.
 func FromHTTP(path string, query url.Values) (*Info, bool) {
+	path = strings.TrimRight(path, "/")
 	svcFromQuery := func() string {
 		return strings.TrimPrefix(query.Get("service"), "git-")
 	}
@@ -88,30 +92,38 @@ func FromHTTP(path string, query url.Values) (*Info, bool) {
 	return nil, false
 }
 
-// FromSSHCommand recognizes "git-receive-pack 'group/repo.git'" style exec commands.
+// sshRepoRe is the repository argument git sends, restricted to characters
+// that mean the same thing to every shell and server: no quoting, globbing,
+// expansion, whitespace or control characters.
+var sshRepoRe = regexp.MustCompile(`^/?[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$`)
+
+// FromSSHCommand recognizes the exec command git sends for SSH transports,
+// "git-receive-pack 'group/repo.git'". Anything that deviates (extra
+// whitespace, other quoting, home-relative or dot-segment paths, unusual
+// characters) is not treated as git, so it's subject to exec policy instead
+// of being trusted as a harmless git operation by a remote shell.
 func FromSSHCommand(cmd string) (*Info, bool) {
-	cmd = strings.TrimSpace(cmd)
-	var svc, rest string
+	var svc, arg string
 	for _, s := range []string{ServiceReceivePack, ServiceUploadPack, ServiceUploadArchive} {
 		for _, prefix := range []string{"git-" + s + " ", "git " + s + " "} {
 			if strings.HasPrefix(cmd, prefix) {
-				svc, rest = s, strings.TrimSpace(cmd[len(prefix):])
+				svc, arg = s, cmd[len(prefix):]
 			}
 		}
 	}
 	if svc == "" {
 		return nil, false
 	}
-	// The argument is usually single-quoted by git; anything shell-trickier
-	// than a single quoted or bare word is rejected rather than guessed at.
-	arg := rest
 	if len(arg) >= 2 && arg[0] == '\'' && arg[len(arg)-1] == '\'' {
 		arg = arg[1 : len(arg)-1]
-		if strings.ContainsRune(arg, '\'') {
+	}
+	if !sshRepoRe.MatchString(arg) {
+		return nil, false
+	}
+	for _, seg := range strings.Split(strings.TrimPrefix(arg, "/"), "/") {
+		if seg == "." || seg == ".." {
 			return nil, false
 		}
-	} else if strings.ContainsAny(arg, " \t'\"\\;&|$`") {
-		return nil, false
 	}
 	return &Info{Service: svc, Repo: cleanRepo(arg)}, true
 }
@@ -158,7 +170,10 @@ func ParsePush(r io.Reader) (*Push, error) {
 	// ReadPkt never reads ahead, so the packfile after the commands is untouched.
 	lr := &io.LimitedReader{R: r, N: MaxCommandBytes}
 	p := &Push{}
-	first := true
+	empty := true
+	// Capabilities ride on the first command line, which may follow any
+	// number of "shallow" lines.
+	seenCommand := false
 	inCert := false
 	for {
 		payload, special, err := ReadPkt(lr)
@@ -166,12 +181,13 @@ func ParsePush(r io.Reader) (*Push, error) {
 			if lr.N <= 0 {
 				return nil, errors.New("push command list exceeds size limit")
 			}
-			if err == io.EOF && first {
+			if err == io.EOF && empty {
 				// Empty body (e.g. a ref advertisement probe).
 				return p, nil
 			}
 			return nil, fmt.Errorf("reading push commands: %w", err)
 		}
+		empty = false
 		if special == "flush" {
 			break
 		}
@@ -179,8 +195,14 @@ func ParsePush(r io.Reader) (*Push, error) {
 			return nil, fmt.Errorf("unexpected %s packet in push commands", special)
 		}
 		line := strings.TrimSuffix(string(payload), "\n")
-		if first {
-			first = false
+		if !inCert && strings.HasPrefix(line, "shallow ") {
+			if seenCommand {
+				return nil, errors.New("shallow line after push commands")
+			}
+			continue
+		}
+		if !seenCommand {
+			seenCommand = true
 			if i := strings.IndexByte(line, 0); i >= 0 {
 				p.Capabilities = strings.Fields(line[i+1:])
 				line = line[:i]
@@ -200,9 +222,6 @@ func ParsePush(r io.Reader) (*Push, error) {
 			if u, ok := parseCommand(line); ok {
 				p.Updates = append(p.Updates, u)
 			}
-			continue
-		}
-		if strings.HasPrefix(line, "shallow ") {
 			continue
 		}
 		u, ok := parseCommand(line)
@@ -231,7 +250,7 @@ func ParsePush(r io.Reader) (*Push, error) {
 
 func parseCommand(line string) (RefUpdate, bool) {
 	parts := strings.SplitN(line, " ", 3)
-	if len(parts) != 3 || !oidRe.MatchString(parts[0]) || !oidRe.MatchString(parts[1]) || parts[2] == "" {
+	if len(parts) != 3 || !oidRe.MatchString(parts[0]) || !oidRe.MatchString(parts[1]) || !validRefName(parts[2]) {
 		return RefUpdate{}, false
 	}
 	u := RefUpdate{OldOID: parts[0], NewOID: parts[1], Ref: parts[2], Type: UpdateUpdate}
@@ -242,6 +261,21 @@ func parseCommand(line string) (RefUpdate, bool) {
 		u.Type = UpdateDelete
 	}
 	return u, true
+}
+
+// validRefName applies the character rules of git check-ref-format, so a
+// ref name a filter sees is exactly the ref the server would update.
+func validRefName(ref string) bool {
+	if ref == "" || !strings.HasPrefix(ref, "refs/") {
+		return false
+	}
+	for _, c := range ref {
+		if c < 0x20 || c == 0x7f || strings.ContainsRune(" ~^:?*[\\", c) {
+			return false
+		}
+	}
+	return !strings.Contains(ref, "..") && !strings.Contains(ref, "@{") && !strings.Contains(ref, "//") &&
+		!strings.HasSuffix(ref, "/") && !strings.HasSuffix(ref, ".lock") && !strings.HasSuffix(ref, ".")
 }
 
 // HasCapability reports whether the client requested a capability.

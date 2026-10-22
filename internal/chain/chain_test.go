@@ -2,6 +2,7 @@ package chain
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
@@ -156,6 +157,15 @@ func TestGitPushRefRule(t *testing.T) {
 			t.Errorf("%s: body altered by inspection", c.name)
 		}
 	}
+	// Unusual URL shapes carrying a push body are still parsed as pushes.
+	main := push(gitproto.RefUpdate{OldOID: a, NewOID: b, Ref: "refs/heads/main"})
+	for _, u := range []string{"https://gitlab.com/g/p.git/git-receive-pack/", "https://gitlab.com/g/p/some-other-route"} {
+		req := httpReq(t, "POST", u, main)
+		req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+		if resp, _ := h(req); resp.Denial == nil {
+			t.Errorf("%s: push to main allowed", u)
+		}
+	}
 	// Ref advertisement for a push carries no commands and is allowed.
 	resp, _ := h(httpReq(t, "GET", "https://gitlab.com/g/p.git/info/refs?service=git-receive-pack", nil))
 	if resp.Denial != nil {
@@ -184,6 +194,16 @@ func TestGraphQLRule(t *testing.T) {
 	req = httpReq(t, "POST", "https://api.github.com/graphql", []byte(`{"query":"{ viewer { login } }"}`))
 	if resp, _ := h(req); resp.Denial != nil {
 		t.Errorf("query denied: %+v", resp.Denial)
+	}
+	// Gzip-encoded bodies are inspected after decoding.
+	var zb bytes.Buffer
+	zw := gzip.NewWriter(&zb)
+	zw.Write([]byte(`{"query":"mutation { deleteRepository(input:{}) { clientMutationId } }"}`))
+	zw.Close()
+	req = httpReq(t, "POST", "https://api.github.com/graphql", zb.Bytes())
+	req.Header.Set("Content-Encoding", "gzip")
+	if resp, _ := h(req); resp.Denial == nil || !strings.Contains(resp.Denial.Reason, "denied by") {
+		t.Errorf("gzip mutation not caught by the rule: %+v", resp.Denial)
 	}
 }
 
@@ -246,6 +266,47 @@ func TestCheckPath(t *testing.T) {
 		if got := CheckPath(p) == nil; got != ok {
 			t.Errorf("CheckPath(%q) ok=%v want %v", p, got, ok)
 		}
+	}
+}
+
+func TestCheckMethod(t *testing.T) {
+	for m, ok := range map[string]bool{"GET": true, "DELETE": true, "PROPFIND": true, "delete": false, "Delete": false, "GET ": false, "": false, "M-SEARCH": false} {
+		if got := CheckMethod(m) == nil; got != ok {
+			t.Errorf("CheckMethod(%q) ok=%v want %v", m, got, ok)
+		}
+	}
+}
+
+func TestCheckMethodOverride(t *testing.T) {
+	form := func(body string) *Request {
+		r := httpReq(t, "POST", "https://gitlab.com/api/v4/projects/1", []byte(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return r
+	}
+	hdr := httpReq(t, "POST", "https://gitlab.com/x", nil)
+	hdr.Header.Set("X-HTTP-Method-Override", "DELETE")
+	multi := httpReq(t, "POST", "https://gitlab.com/x", []byte("--b\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nDELETE\r\n--b--"))
+	multi.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+	for name, c := range map[string]struct {
+		req *Request
+		ok  bool
+	}{
+		"header":     {hdr, false},
+		"query":      {httpReq(t, "POST", "https://gitlab.com/x?_method=DELETE", nil), false},
+		"form":       {form("a=1&_method=DELETE"), false},
+		"multipart":  {multi, false},
+		"plain form": {form("title=hello&description=_method"), true},
+		"json":       {httpReq(t, "POST", "https://gitlab.com/x", []byte(`{"_method":"DELETE"}`)), true},
+	} {
+		if got := CheckMethodOverride(c.req) == nil; got != c.ok {
+			t.Errorf("%s: ok=%v want %v", name, got, c.ok)
+		}
+	}
+	// Inspection must not consume the body.
+	r := form("title=hello")
+	CheckMethodOverride(r)
+	if b, _ := io.ReadAll(r.Body.Reader()); string(b) != "title=hello" {
+		t.Fatalf("body consumed: %q", b)
 	}
 }
 

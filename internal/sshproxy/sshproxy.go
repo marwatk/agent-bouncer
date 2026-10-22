@@ -35,6 +35,25 @@ import (
 
 const preamblePrefix = "BOUNCER-SSH/1 "
 
+// maxPreamble bounds the preamble line.
+const maxPreamble = 8 << 10
+
+// readLine reads up to and including '\n', failing past max bytes.
+func readLine(br *bufio.Reader, max int) (string, error) {
+	var b strings.Builder
+	for b.Len() < max {
+		c, err := br.ReadByte()
+		if err != nil {
+			return "", err
+		}
+		b.WriteByte(c)
+		if c == '\n' {
+			return b.String(), nil
+		}
+	}
+	return "", errors.New("preamble too long")
+}
+
 // Preamble is sent by ssh-connect before the SSH stream.
 type Preamble struct {
 	Token string `json:"token"`
@@ -93,7 +112,7 @@ func (s *Server) handle(c net.Conn) {
 	defer c.Close()
 	br := bufio.NewReader(c)
 	c.SetDeadline(time.Now().Add(60 * time.Second))
-	line, err := br.ReadString('\n')
+	line, err := readLine(br, maxPreamble)
 	if err != nil || !strings.HasPrefix(line, preamblePrefix) {
 		return
 	}
@@ -170,12 +189,14 @@ func (s *Server) prepare(ctx context.Context, p *Preamble) (*conn, error) {
 		}
 		user = svc.Config.User
 	}
-	port := p.Port
-	if svc.Config.Port != 0 {
-		port = svc.Config.Port
-	}
+	// The agent may only pick the port when the service pins one; otherwise
+	// it's 22, so the user's key can't be pointed at other ports on the host.
+	port := svc.Config.Port
 	if port == 0 {
 		port = 22
+		if p.Port != 0 && p.Port != 22 {
+			return cn, fmt.Errorf("ssh to %s port %d is not allowed (set port: on the ssh service to use a non-standard port)", host, p.Port)
+		}
 	}
 	cn.prof, cn.svc, cn.host, cn.user = prof, svc, host, user
 
@@ -359,14 +380,27 @@ func (cn *conn) session(nc ssh.NewChannel) {
 	}
 	defer ch.Close()
 	var setup []*ssh.Request
+	env := map[string]string{}
 	var up ssh.Channel
 	var started bool
 	for r := range reqs {
 		switch r.Type {
-		case "pty-req", "env":
+		case "pty-req":
 			setup = append(setup, r)
 			if r.WantReply {
 				r.Reply(true, nil)
+			}
+		case "env":
+			// Only allowlisted variables reach upstream; an arbitrary env
+			// var could change what the remote command does.
+			var e struct{ Name, Value string }
+			ok := ssh.Unmarshal(r.Payload, &e) == nil && cn.svc.Config.EnvAllowed(e.Name)
+			if ok {
+				setup = append(setup, r)
+				env[e.Name] = e.Value
+			}
+			if r.WantReply {
+				r.Reply(ok, nil)
 			}
 		case "exec", "shell", "subsystem":
 			if started {
@@ -374,7 +408,7 @@ func (cn *conn) session(nc ssh.NewChannel) {
 				continue
 			}
 			started = true
-			up = cn.start(ch, r, setup)
+			up = cn.start(ch, r, setup, env)
 			if up == nil {
 				return
 			}
@@ -400,8 +434,11 @@ func (cn *conn) session(nc ssh.NewChannel) {
 
 // start decides on an exec/shell/subsystem request and, if allowed, wires up
 // the upstream channel. It returns nil if the session is over.
-func (cn *conn) start(ch ssh.Channel, r *ssh.Request, setup []*ssh.Request) ssh.Channel {
+func (cn *conn) start(ch ssh.Channel, r *ssh.Request, setup []*ssh.Request, env map[string]string) ssh.Channel {
 	req := cn.request("")
+	if len(env) > 0 {
+		req.SSH.Env = env
+	}
 	switch r.Type {
 	case "shell":
 		req.SSH.Kind = config.SSHKindShell

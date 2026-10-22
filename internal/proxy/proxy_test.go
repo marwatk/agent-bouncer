@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -57,12 +58,14 @@ func setup(t *testing.T, profileYAML string) *env {
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
-		fmt.Fprintf(w, "auth=%s private=%s path=%s query=%s body=%s", r.Header.Get("Authorization"), r.Header.Get("Private-Token"), r.URL.EscapedPath(), r.URL.RawQuery, body)
+		fmt.Fprintf(w, "widget=%s auth=%s private=%s path=%s query=%s body=%s", r.Header.Get("X-Widget-Key"), r.Header.Get("Authorization"), r.Header.Get("Private-Token"), r.URL.EscapedPath(), r.URL.RawQuery, body)
 	}))
 	t.Cleanup(e.upstream.Close)
 	_, e.port, _ = net.SplitHostPort(e.upstream.Listener.Addr().String())
 
 	t.Setenv("BOUNCER_TEST_TOKEN", "real-secret")
+	// Patterns without a port mean :443; pin the test upstream's port.
+	profileYAML = strings.ReplaceAll(profileYAML, "hosts: [localhost]", `hosts: ["localhost:`+e.port+`"]`)
 	cfg, err := config.Parse([]byte(`
 credentials:
   tok: {source: env, env: BOUNCER_TEST_TOKEN}
@@ -166,14 +169,14 @@ func TestPlaceholderReplacement(t *testing.T) {
 	base := "https://localhost:" + e.port
 	ph := config.Placeholder("tok")
 	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("oauth2:"+ph))
-	_, body := e.get(t, "GET", base+"/x?title="+ph, map[string]string{"Authorization": basic, "Private-Token": ph})
+	_, body := e.get(t, "GET", base+"/x?title="+ph, map[string]string{"Authorization": basic, "Private-Token": ph, "X-Widget-Key": ph})
 	wantBasic := "Basic " + base64.StdEncoding.EncodeToString([]byte("oauth2:real-secret"))
 	if !strings.Contains(body, "auth="+wantBasic) || !strings.Contains(body, "private=real-secret") {
 		t.Fatalf("auth header placeholders not replaced: %s", body)
 	}
 	// A placeholder anywhere an API might store and echo it back must stay a
 	// placeholder, or the agent could read the secret out of, say, an issue title.
-	if !strings.Contains(body, "query=title="+ph) || strings.Count(body, "real-secret") != 1 {
+	if !strings.Contains(body, "query=title="+ph) || !strings.Contains(body, "widget="+ph) || strings.Count(body, "real-secret") != 1 {
 		t.Fatalf("placeholder replaced outside auth headers: %s", body)
 	}
 }
@@ -194,7 +197,8 @@ func TestInjectQuery(t *testing.T) {
 }
 
 func TestTunnelAndUnmatchedDeny(t *testing.T) {
-	e := setup(t, scopedProfile)
+	// The test upstream is on loopback, so reaching it unmatched needs allow_private.
+	e := setup(t, strings.Replace(scopedProfile, "unmatched: tunnel", "unmatched: tunnel\n    allow_private: true", 1))
 	// 127.0.0.1 is not a configured service: tunneled untouched, using the
 	// upstream's own certificate.
 	status, body := e.get(t, "GET", "https://127.0.0.1:"+e.port+"/anything", nil)
@@ -209,6 +213,29 @@ func TestTunnelAndUnmatchedDeny(t *testing.T) {
 	}
 }
 
+func TestTunnelRefusesNonPublicByDefault(t *testing.T) {
+	e := setup(t, scopedProfile)
+	// CONNECT to loopback is refused with a status, not a dead tunnel.
+	if _, err := e.client.Get("https://127.0.0.1:" + e.port + "/"); err == nil || !strings.Contains(err.Error(), "Forbidden") {
+		t.Fatalf("CONNECT to loopback: %v", err)
+	}
+	// Plain-HTTP forwarding to loopback is refused too.
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "reached") }))
+	defer plain.Close()
+	status, body := e.get(t, "GET", plain.URL+"/", nil)
+	if status != 403 || strings.Contains(body, "reached") {
+		t.Fatalf("plain http to loopback: %d %s", status, body)
+	}
+	for _, ip := range []string{"127.0.0.1", "10.1.2.3", "192.168.1.1", "169.254.169.254", "100.100.1.1", "::1", "fe80::1", "0.0.0.0"} {
+		if !nonPublic(net.ParseIP(ip)) {
+			t.Errorf("%s should be non-public", ip)
+		}
+	}
+	if nonPublic(net.ParseIP("140.82.112.3")) {
+		t.Error("public address flagged")
+	}
+}
+
 func TestMissingSessionToken(t *testing.T) {
 	e := setup(t, scopedProfile)
 	proxyURL, _ := url.Parse(e.proxy.URL)
@@ -216,6 +243,47 @@ func TestMissingSessionToken(t *testing.T) {
 	_, err := c.Get("https://localhost:" + e.port + "/")
 	if err == nil || !strings.Contains(err.Error(), "Proxy Authentication Required") {
 		t.Fatalf("expected 407, got %v", err)
+	}
+}
+
+func TestNoCredentialsOverPlainHTTP(t *testing.T) {
+	var gotAuth []string
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+	}))
+	defer plain.Close()
+	_, port, _ := net.SplitHostPort(plain.Listener.Addr().String())
+	e := setup(t, `
+  p:
+    allow_private: true
+    services:
+      - name: api
+        hosts: ["127.0.0.1:`+port+`"]
+        credential: tok
+        inject: {bearer: true}
+      - name: dev
+        hosts: ["localhost:`+port+`"]
+        credential: tok
+        insecure: true
+        inject: {bearer: true}
+`)
+	status, _ := e.get(t, "GET", plain.URL+"/x", nil)
+	if status != 403 {
+		t.Fatalf("plain HTTP to a credentialed service: %d", status)
+	}
+	e.get(t, "GET", "http://localhost:"+port+"/x", nil)
+	if len(gotAuth) != 1 || gotAuth[0] != "Bearer real-secret" {
+		t.Fatalf("insecure: true should allow injection; upstream saw %q", gotAuth)
+	}
+}
+
+func TestCredentialErrorsStayInTheLog(t *testing.T) {
+	e := setup(t, scopedProfile)
+	t.Setenv("BOUNCER_TEST_TOKEN", "")
+	os.Unsetenv("BOUNCER_TEST_TOKEN")
+	_, body := e.get(t, "GET", "https://localhost:"+e.port+"/api/v4/projects/group%2Fproj", nil)
+	if !strings.Contains(body, "unavailable; see the bouncer log") || strings.Contains(body, "BOUNCER_TEST_TOKEN") {
+		t.Fatalf("agent saw credential error details: %s", body)
 	}
 }
 
@@ -233,6 +301,20 @@ func TestReverseMode(t *testing.T) {
 	resp, _ = http.Get(e.proxy.URL + "/s/wrong/localhost:" + e.port + "/x")
 	if resp.StatusCode != 401 {
 		t.Fatalf("bad token: %d", resp.StatusCode)
+	}
+}
+
+func TestUpgradeRefusedOnCredentialedService(t *testing.T) {
+	e := setup(t, `
+  p:
+    services:
+      - name: api
+        hosts: [localhost]
+        credential: tok
+`)
+	status, body := e.get(t, "GET", "https://localhost:"+e.port+"/upgrade", map[string]string{"Connection": "Upgrade", "Upgrade": "echo"})
+	if status != 403 || !strings.Contains(body, "allow_upgrade") {
+		t.Fatalf("%d %s", status, body)
 	}
 }
 

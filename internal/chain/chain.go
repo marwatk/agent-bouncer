@@ -26,7 +26,9 @@ type AskRequest struct {
 	Session *Session
 	Filter  string
 	Prompt  string
-	// Key identifies the decision for "allow for this session"; defaults to Prompt.
+	// Key identifies the decision for "allow for this session". It defaults
+	// to the prompt plus the request, so a remembered answer covers only
+	// identical requests; filters pass a key to group requests on purpose.
 	Key     string
 	Request string
 }

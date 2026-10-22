@@ -1,8 +1,10 @@
 package chain
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"mime"
 	"net/url"
 	"path"
 	"slices"
@@ -29,6 +31,22 @@ func CheckPath(decoded string) error {
 	for _, seg := range strings.Split(decoded, "/") {
 		if seg == "." || seg == ".." {
 			return errors.New("path contains a dot segment")
+		}
+	}
+	return nil
+}
+
+// CheckMethod rejects HTTP methods that aren't upper-case tokens. Method
+// names are case-sensitive, but some servers fold them, so a method that
+// differs only in case from one a rule names could be evaluated as one
+// method and executed as another.
+func CheckMethod(m string) error {
+	if m == "" {
+		return errors.New("empty method")
+	}
+	for _, c := range m {
+		if c < 'A' || c > 'Z' {
+			return fmt.Errorf("non-canonical method %q (methods must be upper-case letters)", m)
 		}
 	}
 	return nil
@@ -144,4 +162,47 @@ func matchGitHubRepo(req *Request, repo string) (bool, error) {
 		return strings.EqualFold(segs[1]+"/"+segs[2], repo), nil
 	}
 	return false, nil
+}
+
+var methodOverrideHeaders = []string{"X-Http-Method-Override", "X-Http-Method", "X-Method-Override"}
+
+// CheckMethodOverride rejects requests that ask the server to treat them as
+// a different method (Rails/Rack, Laravel and others honor these), which
+// would let a POST that policy allowed run as, say, a DELETE.
+func CheckMethodOverride(req *Request) error {
+	for _, h := range methodOverrideHeaders {
+		if req.Header.Get(h) != "" {
+			return fmt.Errorf("method override header %s is not allowed", h)
+		}
+	}
+	if req.URL.Query().Has("_method") {
+		return errors.New("_method query parameter is not allowed")
+	}
+	if req.Method != "POST" || req.Body == nil {
+		return nil
+	}
+	ct, _, _ := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	switch ct {
+	case "application/x-www-form-urlencoded":
+		body, err := req.Body.ReadAll()
+		if err != nil {
+			return fmt.Errorf("inspecting form body: %w", err)
+		}
+		form, err := url.ParseQuery(string(body))
+		if err != nil {
+			return fmt.Errorf("unparseable form body: %w", err)
+		}
+		if form.Has("_method") {
+			return errors.New("_method form field is not allowed")
+		}
+	case "multipart/form-data":
+		body, err := req.Body.ReadAll()
+		if err != nil {
+			return fmt.Errorf("inspecting multipart body: %w", err)
+		}
+		if bytes.Contains(body, []byte(`name="_method"`)) || bytes.Contains(body, []byte(`name=_method`)) {
+			return errors.New("_method form field is not allowed")
+		}
+	}
+	return nil
 }

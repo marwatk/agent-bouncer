@@ -28,7 +28,8 @@ interface Config {
 
 export default defineFilter<Config>({
   async onRequest(req, next, ctx) {
-    if (req.path !== "/graphql") return next(req);
+    // github.com serves /graphql; GitHub Enterprise Server serves /api/graphql.
+    if (!/^(\/api)?\/graphql\/*$/.test(req.path)) return next(req);
     let ops;
     try {
       ops = await req.graphql();

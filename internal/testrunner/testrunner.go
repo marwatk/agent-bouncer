@@ -269,7 +269,14 @@ func runCase(c *Case, httpChain, sshChain func(string) ([]chain.Filter, string, 
 		}
 		req = &chain.Request{Ctx: context.Background(), Transport: chain.TransportHTTP, Session: sess, Profile: profile,
 			Service: service, Method: method, URL: u, Header: h, Body: chain.BytesBody(body)}
-		if err := chain.CheckPath(u.Path); err != nil {
+		err = chain.CheckMethod(method)
+		if err == nil {
+			err = chain.CheckPath(u.Path)
+		}
+		if err == nil {
+			err = chain.CheckMethodOverride(req)
+		}
+		if err != nil {
 			return check(c, chain.Deny("bouncer", err.Error()), ap, nil)
 		}
 	case c.SSH != nil:

@@ -38,8 +38,9 @@ func (d *Daemon) RunTerminalApprover(in io.Reader, out io.Writer) {
 		if session == "" {
 			session = p.SessionID
 		}
+		d := approval.Display
 		fmt.Fprintf(out, "\n=== approval needed [%s] session=%s profile=%s filter=%s\n  %s\n  request: %s\n  [y] allow once  [s] allow for session  [n] deny  [d] deny for session > ",
-			p.ID, session, p.Profile, p.Filter, p.Prompt, p.Request)
+			p.ID, d(session, 60), d(p.Profile, 60), d(p.Filter, 60), d(p.Prompt, 300), d(p.Request, 300))
 	}
 	for {
 		select {

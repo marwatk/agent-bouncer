@@ -63,7 +63,7 @@ config and compiles every filter.
 | Situation | Use |
 |---|---|
 | You launch the agent | `bouncer exec [--profile p] [--label l] -- <command>`: sets everything below, then revokes the session on exit |
-| The agent is launched some other way | `eval "$(bouncer env)"` (`--shell fish\|powershell\|cmd` too), then start it from that shell |
+| The agent is launched some other way | `eval "$(bouncer env)"` (`--shell fish\|powershell\|cmd` too), then start it from that shell; the session expires after `--ttl` (default 24h) |
 | The tool ignores proxy variables | Point its base URL at `$BOUNCER_BASE/<host>`, e.g. `$BOUNCER_BASE/gitlab.com/api/v4` (reverse-proxy mode; configured services only) |
 | The tool can't send proxy credentials | Set `anonymous_profile:`; any local client without a token gets that profile |
 | Your own ssh config is in play | `Include` the generated `state/ssh/config`, or use `GIT_SSH_COMMAND` from `bouncer env` |
@@ -121,14 +121,39 @@ stdout works (the Bitwarden CLI, 1Password, `pass`, `security find-generic-passw
 `vault kv get -field=...`). Secrets are cached per `cache` (default 5m).
 `bouncer cred test NAME` fetches a credential without printing it.
 
+**Bulk, at startup (containers, CI, no keyring):**
+
+```sh
+bouncer serve --creds-from <(gen_creds.sh)     # or a file, or - for stdin
+```
+
+```bash
+#!/bin/bash
+# gen_creds.sh: one "name: value" per line; the value is taken verbatim.
+printf 'gitlab: %s\n' "$(rbw get gitlab)"
+printf 'github: %s\n' "$(rbw get github)"
+printf 'deploy-key:: %s\n' "$(base64 < ~/.ssh/deploy_key | tr -d '\n')"   # "::" = base64, for multi-line values
+```
+
+Values are read once and kept only in memory. They override any configured
+source, so one config can use the keyring on your laptop and injected values
+in a container. Mark a credential `source: provided` to require it from
+`--creds-from`. Startup fails on an unknown name, a duplicate, a missing
+`provided` value, or input that looks like a missing `\n`.
+
 **Injection.** `inject:` sets `bearer: true`, `basic: {username}`,
 `header` + `value` (with `{{secret}}`), or `query: param`. `inject.git`
 overrides this for git smart-HTTP, which usually needs Basic auth even when
-the API takes a token header. Without `inject`, bouncer swaps the
-credential's placeholder (`bouncer-placeholder-<name>`) for the real secret,
-but only inside authentication headers. That restriction is deliberate: an
-API that stores and echoes back other fields (an issue title, say) would
-otherwise hand the secret to the agent.
+the API takes a token header. Credentials are never sent over plain HTTP
+unless the service sets `insecure: true` (for local development only).
+
+Bouncer also swaps the credential's placeholder (`bouncer-placeholder-<name>`)
+for the real secret, so tools that must send a token themselves keep
+working. The swap happens only in `Authorization` (Basic included),
+`Private-Token`, `inject.header` and headers listed in
+`inject.placeholder_headers`. That restriction is deliberate: an API that
+stores and echoes back other fields (an issue title, say) would otherwise
+hand the secret to the agent.
 
 ## Policy
 
@@ -137,19 +162,21 @@ profiles:
   default:
     unmatched: tunnel            # or deny
     tunnel: [api.anthropic.com]  # passed through even when unmatched: deny
+    allow_private: false         # tunnels may not reach loopback/LAN/metadata (default)
     filters: [filters/redact-response.ts]   # every intercepted request in this profile
     services:
       - name: gitlab
-        hosts: [gitlab.com]                 # exact, *.wildcard, optional :port
+        hosts: [gitlab.com]                 # exact or *.wildcard; no port means :443
         credential: gitlab
         inject: {header: PRIVATE-TOKEN, git: {basic: {username: oauth2}}}
         filters:
           - path: filters/git-protect-branches.ts
             config: {branches: [main, "release/*"]}
         rules:                              # first match wins
-          - action: deny
-            gitlab_project: {path: mygroup/myproject, subpaths: ["variables/**", "members/**"]}
-          - action: allow
+          - action: allow                   # an allowlist of endpoints in the project...
+            gitlab_project: {path: mygroup/myproject, subpaths: ["issues/**", "merge_requests/**"]}
+          - action: allow                   # ...plus git, where branch filters apply
+            git: {}
             gitlab_project: mygroup/myproject
         # default: deny when rules exist, allow otherwise
     ssh:
@@ -179,8 +206,12 @@ A rule's matchers are ANDed together:
 | `ssh: {kinds, command}` | SSH channel kind and exec command regex |
 
 Actions are `allow`, `deny` and `ask`. Before any rules run, bouncer rejects
-paths whose meaning could differ between it and the upstream: dot segments
-(literal or encoded), empty segments, backslashes and NULs.
+requests whose meaning could differ between it and the upstream:
+* paths with dot segments (literal or encoded), empty segments, backslashes or NULs
+* methods that aren't upper-case
+* method overrides (`X-HTTP-Method-Override` and similar headers, `_method`
+  query or form fields). Checking form bodies means POSTed forms are buffered,
+  up to 16 MiB.
 
 ## Writing filters
 
@@ -273,7 +304,9 @@ session, `[n]` deny, or `[d]` deny for the session. A desktop notification
 fires too. From another terminal, use `bouncer approvals` and
 `bouncer approve|deny <id> [--session]`. Unanswered asks are denied after
 `approvals.timeout` (default 2m). Concurrent identical asks from one session
-share a single prompt.
+share a single prompt; different requests always get their own. "For the
+session" covers identical requests only, unless a filter passes an explicit
+`key` to `ask()` to group related requests on purpose.
 
 ## Threat model and limits
 
@@ -287,13 +320,37 @@ Read this before relying on bouncer.
   a container or a VM all work. The admin token in `state/admin-token`
   controls sessions and approvals; set `approvals.cli: false` if the agent
   might reach that file.
+* **Tunnels only reach public addresses.** Unmatched traffic can't reach
+  loopback, private, link-local (including cloud metadata), CGNAT or
+  multicast addresses. The check runs on the resolved IP, so DNS tricks
+  don't get around it. Set `allow_private: true` on a profile to lift it.
+  Configured services are unaffected.
+* **Keep the proxy on loopback where you can.** Session tokens travel in
+  cleartext proxy headers, so binding `listen:` to `0.0.0.0` or a LAN
+  interface exposes them to that network. A container or VM can't reach the
+  host's loopback, so for those, bind to the specific bridge or host-only
+  interface the sandbox uses and firewall it to that sandbox.
+  `anonymous_profile` is refused on non-loopback addresses.
 * **Filters are trusted code.** They run in-process with no sandbox, by
   design for v1. Only load filters you'd run yourself.
 * **Scoping has edges.** GraphQL can't be scoped by URL; allowing it opens
   everything the token can reach (the GraphQL guard limits *what*, not
-  *where*). `gitlab_project` scopes *which* project; use `subpaths` rules to
-  limit what the agent may do inside it. Push rejection only sees ref names,
+  *where*). `gitlab_project` scopes *which* project; use `subpaths` to limit
+  what the agent may do inside it, and prefer allowlists, since a denylist
+  misses endpoints. Git filters only see git pushes, so keep API commit
+  endpoints (`repository/files`, `repository/commits`) out of the allowlist
+  if branch protection matters. Push rejection only sees ref names,
   not history, so it can't tell a force push from a normal one.
+* **The CA can impersonate any site.** `bouncer ca install` makes the
+  bouncer CA a trusted root for your user (browsers included), and its key
+  sits in the state directory. Treat that directory like your SSH keys:
+  keep it out of backups you don't trust and away from the agent. On
+  Windows, Unix file modes don't apply, so check its ACLs. If the key leaks,
+  delete `ca.pem`/`ca-key.pem`, restart, and reinstall. The SSH CA is only
+  trusted for the configured SSH hosts.
+* **Upgraded connections aren't filtered.** After a WebSocket upgrade the
+  stream is raw, so credentialed services refuse upgrades unless they set
+  `allow_upgrade: true`.
 * **Interception is HTTP/1.1 to the client.** Upstream connections use
   HTTP/2 where available. Apps that pin certificates won't work through
   interception; tunnel them or leave them out.

@@ -27,3 +27,25 @@ cases:
       headers: {Content-Type: application/x-www-form-urlencoded}
       body: "files=%5B%5D&channels=C0AGENTBOT,C0RANDOM"
     expect: deny
+  - name: duplicate form channel is refused
+    request:
+      method: POST
+      url: https://slack.com/api/chat.postMessage
+      headers: {Content-Type: application/x-www-form-urlencoded}
+      body: "channel=C0AGENTBOT&channel=C0GENERAL&text=hi"
+    expect: deny
+    expect_reason: more than once
+  - name: channel in both query and body is refused
+    request:
+      method: POST
+      url: "https://slack.com/api/chat.postMessage?channel=C0AGENTBOT"
+      headers: {Content-Type: application/json}
+      body: '{"channel":"C0GENERAL","text":"hi"}'
+    expect: deny
+  - name: duplicate JSON channel key is refused
+    request:
+      method: POST
+      url: https://slack.com/api/chat.postMessage
+      headers: {Content-Type: application/json}
+      body: '{"channel":"C0AGENTBOT","channel":"C0GENERAL"}'
+    expect: deny

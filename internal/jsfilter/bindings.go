@@ -194,12 +194,24 @@ func (i *instance) rejected(err error) goja.Value {
 	return i.vm.ToValue(p)
 }
 
-// blocking runs a host operation that may wait on I/O with the CPU watchdog
-// paused, returning a settled promise.
+// blocking runs a host operation that waits on something outside the
+// filter (upstream, a human) with the CPU watchdog paused, returning a
+// settled promise.
 func (i *instance) blocking(fn func() (goja.Value, error)) goja.Value {
-	i.wd.pause()
+	return i.hostCall(true, fn)
+}
+
+// hostCall runs a host operation, pausing the watchdog only if it may wait
+// on I/O. Work served from memory counts against the filter's budget, so a
+// loop of cheap host calls can't run unbounded.
+func (i *instance) hostCall(mayWait bool, fn func() (goja.Value, error)) goja.Value {
+	if mayWait {
+		i.wd.pause()
+	}
 	v, err := fn()
-	i.wd.resume()
+	if mayWait {
+		i.wd.resume()
+	}
 	if err != nil {
 		return i.rejected(err)
 	}
@@ -282,6 +294,14 @@ func toBytes(i *instance, v goja.Value) ([]byte, error) {
 	return []byte(s.String()), nil
 }
 
+// nonNil makes a missing list encode as [] rather than null.
+func nonNil(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
+}
+
 func textOf(b []byte) string {
 	if utf8.Valid(b) {
 		return string(b)
@@ -299,7 +319,7 @@ func (i *instance) headers(h http.Header) *goja.Object {
 		}
 		return i.vm.ToValue(strings.Join(v, ", "))
 	})
-	o.Set("getAll", func(name string) goja.Value { return i.plain(h.Values(name)) })
+	o.Set("getAll", func(name string) goja.Value { return i.plain(nonNil(h.Values(name))) })
 	o.Set("has", func(name string) bool { return len(h.Values(name)) > 0 })
 	o.Set("set", func(name, value string) { h.Set(name, value) })
 	o.Set("append", func(name, value string) { h.Add(name, value) })
@@ -323,31 +343,31 @@ func (i *instance) body(b *chain.Body) *goja.Object {
 	}
 	o := i.vm.NewObject()
 	o.Set("peek", func(n int) goja.Value {
-		return i.blocking(func() (goja.Value, error) {
+		return i.hostCall(!b.Buffered(n), func() (goja.Value, error) {
 			p, err := b.Peek(n)
 			return i.bytesValue(p), err
 		})
 	})
 	o.Set("peekText", func(n int) goja.Value {
-		return i.blocking(func() (goja.Value, error) {
+		return i.hostCall(!b.Buffered(n), func() (goja.Value, error) {
 			p, err := b.Peek(n)
 			return i.vm.ToValue(textOf(p)), err
 		})
 	})
 	o.Set("bytes", func() goja.Value {
-		return i.blocking(func() (goja.Value, error) {
+		return i.hostCall(!b.Complete(), func() (goja.Value, error) {
 			p, err := b.ReadAll()
 			return i.bytesValue(p), err
 		})
 	})
 	o.Set("text", func() goja.Value {
-		return i.blocking(func() (goja.Value, error) {
+		return i.hostCall(!b.Complete(), func() (goja.Value, error) {
 			p, err := b.ReadAll()
 			return i.vm.ToValue(textOf(p)), err
 		})
 	})
 	o.Set("json", func() goja.Value {
-		return i.blocking(func() (goja.Value, error) {
+		return i.hostCall(!b.Complete(), func() (goja.Value, error) {
 			p, err := b.ReadAll()
 			if err != nil {
 				return nil, err
@@ -393,13 +413,13 @@ func (i *instance) wrapRequest(req *chain.Request) *goja.Object {
 			}
 			return vm.ToValue(q.Get(k))
 		})
-		qo.Set("getAll", func(k string) goja.Value { return i.plain(q[k]) })
+		qo.Set("getAll", func(k string) goja.Value { return i.plain(nonNil(q[k])) })
 		qo.Set("has", func(k string) bool { return q.Has(k) })
 		o.Set("query", qo)
 		o.Set("headers", i.headers(req.Header))
 		o.Set("body", i.body(req.Body))
 		o.Set("graphql", func() goja.Value {
-			return i.blocking(func() (goja.Value, error) {
+			return i.hostCall(!bodyComplete(req), func() (goja.Value, error) {
 				ops, err := req.GraphQL()
 				if err != nil {
 					return nil, err
@@ -428,9 +448,9 @@ func (i *instance) wrapRequest(req *chain.Request) *goja.Object {
 			}
 			return i.plain(p), nil
 		}
-		go_.Set("push", func() goja.Value { return i.blocking(push) })
+		go_.Set("push", func() goja.Value { return i.hostCall(!bodyComplete(req), push) })
 		go_.Set("refUpdates", func() goja.Value {
-			return i.blocking(func() (goja.Value, error) {
+			return i.hostCall(!bodyComplete(req), func() (goja.Value, error) {
 				p, err := req.Push()
 				if err != nil {
 					return nil, err
@@ -447,6 +467,8 @@ func (i *instance) wrapRequest(req *chain.Request) *goja.Object {
 	}
 	return o
 }
+
+func bodyComplete(req *chain.Request) bool { return req.Body == nil || req.Body.Complete() }
 
 func (i *instance) nextFunc(req *chain.Request, next chain.Handler) goja.Value {
 	called := false

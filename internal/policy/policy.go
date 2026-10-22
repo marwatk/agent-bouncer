@@ -21,8 +21,10 @@ type Profile struct {
 	Name      string
 	Unmatched string
 	Tunnel    []string
-	Services  []*Service
-	SSH       []*SSHService
+	// AllowPrivate permits tunnels to non-public addresses.
+	AllowPrivate bool
+	Services     []*Service
+	SSH          []*SSHService
 }
 
 // Service is an intercepted HTTP service with its full filter chain:
@@ -48,7 +50,7 @@ func Compile(cfg *config.Config, env *chain.Env, store *kv.Store) (*Set, error) 
 		if err != nil {
 			return nil, err
 		}
-		p := &Profile{Name: name, Unmatched: rp.UnmatchedMode(), Tunnel: rp.Tunnel}
+		p := &Profile{Name: name, Unmatched: rp.UnmatchedMode(), Tunnel: rp.Tunnel, AllowPrivate: rp.AllowPrivate != nil && *rp.AllowPrivate}
 		load := func(refs []config.FilterRef) ([]chain.Filter, error) {
 			var out []chain.Filter
 			for _, ref := range refs {

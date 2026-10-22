@@ -2,7 +2,9 @@ package ca
 
 import (
 	"crypto/x509"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -59,5 +61,31 @@ func TestSSHHostCert(t *testing.T) {
 	}
 	if err := checker.CheckHostKey("github.com:22", nil, cert); err == nil {
 		t.Fatal("cert should not be valid for another host")
+	}
+}
+
+func TestLeafCacheBounded(t *testing.T) {
+	a, err := LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxLeaves+50; i++ {
+		if _, err := a.Leaf(fmt.Sprintf("h%d.example.com", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(a.leaves); n > maxLeaves {
+		t.Fatalf("leaf cache grew to %d", n)
+	}
+}
+
+func TestSSHKnownHostsScoped(t *testing.T) {
+	a, _ := LoadOrCreate(t.TempDir())
+	line := a.SSHKnownHostsLine([]string{"gitlab.com", "*.dev.internal"})
+	if !strings.HasPrefix(line, "@cert-authority gitlab.com,[gitlab.com]:*,*.dev.internal,[*.dev.internal]:* ssh-ed25519 ") {
+		t.Fatalf("%q", line)
+	}
+	if a.SSHKnownHostsLine(nil) != "" {
+		t.Fatal("no hosts should trust nothing")
 	}
 }

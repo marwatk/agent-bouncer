@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Control serves the /_bouncer/ API used by the CLI. Every call requires
@@ -24,17 +25,25 @@ func (d *Daemon) Control() http.Handler {
 		})
 	})
 	mux.HandleFunc("POST /_bouncer/sessions", func(w http.ResponseWriter, r *http.Request) {
-		var body struct{ Profile, Label string }
+		var body struct{ Profile, Label, TTL string }
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		rec, err := d.CreateSession(body.Profile, body.Label)
+		var ttl time.Duration
+		if body.TTL != "" {
+			var err error
+			if ttl, err = time.ParseDuration(body.TTL); err != nil {
+				http.Error(w, "ttl: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		rec, err := d.CreateSession(body.Profile, body.Label, ttl)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, NewSession{SessionRecord: *rec, ProxyAddr: d.proxyAddr, SSHAddr: d.sshAddr, Placeholders: d.Placeholders()})
+		writeJSON(w, NewSession{SessionRecord: *rec, ProxyAddr: d.proxyAddr, SSHAddr: d.sshAddr, Placeholders: d.Placeholders(), SSHHosts: d.SSHHosts()})
 	})
 	mux.HandleFunc("GET /_bouncer/sessions", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, d.listSessions())
@@ -78,6 +87,7 @@ func (d *Daemon) Control() http.Handler {
 			http.Error(w, "agent-bouncer: admin token required", http.StatusUnauthorized)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		mux.ServeHTTP(w, r)
 	})
 }

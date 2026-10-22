@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -44,6 +45,9 @@ type Server struct {
 	Transport http.RoundTripper
 	Dialer    *net.Dialer
 	Logf      func(format string, args ...any)
+
+	tunnelOnce      sync.Once
+	publicTransport http.RoundTripper
 }
 
 // NewTransport returns the upstream transport. It never uses a proxy from the
@@ -137,6 +141,26 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dial unmatched hosts before accepting the CONNECT so a refusal reaches
+	// the client as a status code rather than a dead tunnel.
+	var up net.Conn
+	var err error
+	if svc == nil {
+		e := s.entry(sess, "http", "", "CONNECT "+target)
+		up, err = s.tunnelDial(r.Context(), prof.AllowPrivate, target)
+		if err != nil {
+			e.Decision, e.Reason, e.Status = "deny", err.Error(), 403
+			if !errors.Is(err, errNonPublic) {
+				e.Decision, e.Status = "error", 502
+			}
+			s.Audit.Write(e)
+			http.Error(w, "agent-bouncer: "+err.Error(), e.Status)
+			return
+		}
+		e.Decision = "tunnel"
+		s.Audit.Write(e)
+	}
+
 	conn, buf, err := http.NewResponseController(w).Hijack()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -148,8 +172,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	client := &bufferedConn{Conn: conn, r: buf.Reader}
 
-	if svc == nil {
-		s.tunnel(client, target, sess)
+	if up != nil {
+		splice(client, up)
 		return
 	}
 
@@ -205,20 +229,6 @@ func hostForURL(hostport, defPort string) string {
 	return net.JoinHostPort(h, p)
 }
 
-func (s *Server) tunnel(client net.Conn, target string, sess *chain.Session) {
-	e := s.entry(sess, "http", "", "CONNECT "+target)
-	up, err := s.Dialer.Dial("tcp", target)
-	if err != nil {
-		e.Decision, e.Reason = "error", err.Error()
-		s.Audit.Write(e)
-		client.Close()
-		return
-	}
-	e.Decision = "tunnel"
-	s.Audit.Write(e)
-	splice(client, up)
-}
-
 // handleAbsolute serves plain-HTTP proxy requests (GET http://host/...).
 func (s *Server) handleAbsolute(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.proxySession(r)
@@ -258,9 +268,13 @@ func (s *Server) handleAbsolute(w http.ResponseWriter, r *http.Request) {
 	out.RequestURI = ""
 	out.URL = &u
 	removeHopHeaders(out.Header)
-	resp, err := s.Transport.RoundTrip(out)
+	resp, err := s.tunnelTransport(prof.AllowPrivate).RoundTrip(out)
 	if err != nil {
-		http.Error(w, "agent-bouncer: upstream error: "+err.Error(), http.StatusBadGateway)
+		status := http.StatusBadGateway
+		if errors.Is(err, errNonPublic) {
+			status = http.StatusForbidden
+		}
+		http.Error(w, "agent-bouncer: upstream error: "+err.Error(), status)
 		return
 	}
 	defer resp.Body.Close()
@@ -320,7 +334,14 @@ func (s *Server) intercept(w http.ResponseWriter, r *http.Request, sess *chain.S
 		s.Audit.Write(e)
 	}()
 
-	if err := chain.CheckPath(u.Path); err != nil {
+	err := chain.CheckMethod(r.Method)
+	if err == nil {
+		err = chain.CheckPath(u.Path)
+	}
+	if err == nil {
+		err = chain.CheckMethodOverride(req)
+	}
+	if err != nil {
 		e.Decision, e.By, e.Reason, e.Status = "deny", "bouncer", err.Error(), 400
 		writeDenial(w, &chain.Denial{By: "bouncer", Reason: err.Error(), Status: 400})
 		return
@@ -352,7 +373,7 @@ func (s *Server) intercept(w http.ResponseWriter, r *http.Request, sess *chain.S
 // pushRejection renders a denied git push as a receive-pack result, which
 // git displays far better than an HTTP error.
 func pushRejection(req *chain.Request, d *chain.Denial) []byte {
-	if req.Method != http.MethodPost || !strings.HasSuffix(req.URL.Path, "/git-receive-pack") {
+	if !req.IsPushRequest() {
 		return nil
 	}
 	push, err := req.Push()

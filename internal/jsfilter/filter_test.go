@@ -199,6 +199,30 @@ func TestTimeoutFailsClosedAndExcludesBlockedTime(t *testing.T) {
 	}
 }
 
+func TestGetAllReturnsArrays(t *testing.T) {
+	f := load(t, `import { deny } from "bouncer";
+export default { onRequest(req, next) {
+  const q = req.query.getAll("missing"), h = req.headers.getAll("X-Missing");
+  if (!Array.isArray(q) || q.length || !Array.isArray(h) || h.length) return deny("not empty arrays");
+  return next(req);
+} };`, Options{})
+	if resp, _ := chain.Build([]chain.Filter{f}, upstream("ok"))(req(t, "GET", "https://x/", nil)); resp.Denial != nil {
+		t.Fatal(resp.Denial.Reason)
+	}
+}
+
+func TestHostCallLoopStillHitsBudget(t *testing.T) {
+	f := load(t, `export default { async onRequest(req, next) { for (;;) { await req.body.peek(1); } } };`, Options{Timeout: 100 * time.Millisecond})
+	start := time.Now()
+	resp, _ := chain.Build([]chain.Filter{f}, upstream("ok"))(req(t, "POST", "https://x/", []byte("abc")))
+	if resp.Denial == nil || !strings.Contains(resp.Denial.Reason, "CPU budget") {
+		t.Fatalf("expected budget denial, got %+v", resp.Denial)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("100ms budget took %v: in-memory host calls aren't being counted", elapsed)
+	}
+}
+
 func TestErrorsFailClosedWithSourceLocation(t *testing.T) {
 	f := load(t, `
 import { defineFilter } from "bouncer";

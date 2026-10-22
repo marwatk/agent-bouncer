@@ -19,7 +19,7 @@ import (
 	"github.com/marwatk/agent-bouncer/internal/sshproxy"
 )
 
-type sessionFlags struct{ profile, label string }
+type sessionFlags struct{ profile, label, ttl string }
 
 func (f *sessionFlags) add(cmd *cobra.Command) {
 	cmd.Flags().StringVarP(&f.profile, "profile", "p", "", "policy profile (default: default_profile from config)")
@@ -33,7 +33,7 @@ func sessionEnv(f sessionFlags) (*client, *daemon.SessionRecord, envexport.Env, 
 		return nil, nil, envexport.Env{}, err
 	}
 	var rec daemon.NewSession
-	if err := c.do("POST", "/_bouncer/sessions", map[string]string{"profile": f.profile, "label": f.label}, &rec); err != nil {
+	if err := c.do("POST", "/_bouncer/sessions", map[string]string{"profile": f.profile, "label": f.label, "ttl": f.ttl}, &rec); err != nil {
 		return nil, nil, envexport.Env{}, err
 	}
 	state := paths.StateDir()
@@ -52,7 +52,7 @@ func sessionEnv(f sessionFlags) (*client, *daemon.SessionRecord, envexport.Env, 
 		ProxyAddr: rec.ProxyAddr, SSHAddr: rec.SSHAddr, Token: rec.Token, SessionID: rec.ID,
 		CACert: authority.CertPath(), CABundle: authority.BundlePath(), Placeholders: rec.Placeholders,
 	}
-	if files, err := envexport.WriteSSHFiles(state, exe, authority.SSHKnownHostsLine()); err != nil {
+	if files, err := envexport.WriteSSHFiles(state, exe, authority.SSHKnownHostsLine(rec.SSHHosts)); err != nil {
 		fmt.Fprintf(os.Stderr, "bouncer: warning: ssh routing disabled: %v\n", err)
 	} else {
 		p.SSHConfig, p.ShimDir, p.SSHCommand = files.Config, files.ShimDir, files.Command
@@ -73,7 +73,8 @@ agents bouncer doesn't launch itself:
   bouncer env --shell fish | source                              # fish
   bouncer env --shell powershell | Invoke-Expression             # PowerShell
 
-The session lasts until revoked with ` + "`bouncer sessions end <id>`" + `.`,
+The session expires after --ttl (default 24h) or when revoked with
+` + "`bouncer sessions end <id>`" + `.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if shell == "" {
@@ -96,6 +97,7 @@ The session lasts until revoked with ` + "`bouncer sessions end <id>`" + `.`,
 		},
 	}
 	f.add(cmd)
+	cmd.Flags().StringVar(&f.ttl, "ttl", "24h", "session lifetime (0 = until revoked)")
 	cmd.Flags().StringVar(&shell, "shell", "", "output syntax: sh, bash, zsh, fish, powershell, cmd (default: detected)")
 	return cmd
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,9 @@ type Store struct {
 	// fetch serializes concurrent fetches per credential so an interactive
 	// command (e.g. a password manager unlock) only runs once.
 	fetch map[string]*sync.Mutex
+	// provided holds values given at startup (--creds-from). They take
+	// precedence over each credential's configured source and survive reloads.
+	provided map[string]string
 }
 
 type cached struct {
@@ -41,7 +45,36 @@ type cached struct {
 }
 
 func NewStore(creds map[string]*config.Credential) *Store {
-	return &Store{creds: creds, cache: map[string]cached{}, fetch: map[string]*sync.Mutex{}}
+	return &Store{creds: creds, cache: map[string]cached{}, fetch: map[string]*sync.Mutex{}, provided: map[string]string{}}
+}
+
+// SetProvided installs startup-provided secrets, replacing any set before.
+func (s *Store) SetProvided(values map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.provided = values
+}
+
+func (s *Store) providedValue(name string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.provided[name]
+	return v, ok
+}
+
+// MissingProvided lists credentials with source: provided that have no
+// startup value.
+func (s *Store) MissingProvided() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for name, c := range s.creds {
+		if _, ok := s.provided[name]; c.Source == "provided" && !ok {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ConfigureBitwarden sets where the process stores its Bitwarden device id
@@ -106,6 +139,9 @@ func (s *Store) Get(ctx context.Context, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if v, ok := s.providedValue(name); ok {
+		return v, nil
+	}
 	if c.Source == "ssh-agent" {
 		return "", fmt.Errorf("credential %q is an ssh-agent credential and has no secret value", name)
 	}
@@ -153,6 +189,8 @@ func fetch(ctx context.Context, c *config.Credential) (string, error) {
 			return "", err
 		}
 		return strings.TrimRight(string(b), "\r\n"), nil
+	case "provided":
+		return "", errors.New("no value provided; pass it with `bouncer serve --creds-from`")
 	case "command":
 		ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 		defer cancel()
@@ -190,7 +228,7 @@ func (s *Store) SSHSigners(ctx context.Context, name string) ([]ssh.Signer, erro
 	if err != nil {
 		return nil, err
 	}
-	if c.Source == "ssh-agent" {
+	if _, ok := s.providedValue(name); c.Source == "ssh-agent" && !ok {
 		return agentSigners(c)
 	}
 	pemData, err := s.Get(ctx, name)

@@ -86,6 +86,21 @@ func (b *Body) ReadAll() ([]byte, error) {
 	return append([]byte(nil), b.buf...), nil
 }
 
+// Buffered reports whether the first n bytes (or the whole body, if
+// shorter) can be served without reading from the source.
+func (b *Body) Buffered(n int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.eof || b.err != nil || b.consumed || len(b.buf) >= n
+}
+
+// Complete reports whether the whole body is already in memory.
+func (b *Body) Complete() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.eof || b.err != nil || b.consumed
+}
+
 // Set replaces the body contents.
 func (b *Body) Set(data []byte) {
 	b.mu.Lock()

@@ -3,10 +3,12 @@
 package chain
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +28,9 @@ type Session struct {
 	ID      string `json:"id"`
 	Label   string `json:"label"`
 	Profile string `json:"profile"`
+	// Shared marks a session used by many clients (the anonymous profile);
+	// "for this session" approvals are not remembered for it.
+	Shared bool `json:"-"`
 }
 
 // SSHInfo describes an SSH channel request.
@@ -38,6 +43,8 @@ type SSHInfo struct {
 	Subsystem string `json:"subsystem,omitempty"`
 	// Target is host:port for port forwards.
 	Target string `json:"target,omitempty"`
+	// Env holds the allowlisted environment variables the client set.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 // Request is what filters and rules evaluate. For HTTP it is an intercepted
@@ -107,6 +114,12 @@ func (r *Request) Git() *gitproto.Info {
 		case TransportHTTP:
 			if r.URL != nil {
 				r.git, _ = gitproto.FromHTTP(r.URL.Path, r.URL.Query())
+				// A push body is a push wherever it's sent: servers may route
+				// URL shapes we don't recognize, and ref policy must still run.
+				if r.isPushContent() && (r.git == nil || r.git.Service != gitproto.ServiceReceivePack) {
+					repo := strings.TrimSuffix(strings.TrimRight(r.URL.Path, "/"), "/git-receive-pack")
+					r.git = &gitproto.Info{Service: gitproto.ServiceReceivePack, Repo: strings.TrimSuffix(strings.Trim(repo, "/"), ".git")}
+				}
 			}
 		case TransportSSH:
 			if r.SSH != nil && r.SSH.Command != "" {
@@ -126,7 +139,7 @@ func (r *Request) Push() (*gitproto.Push, error) {
 		return nil, nil
 	}
 	r.pushOnce.Do(func() {
-		if r.Transport == TransportHTTP && !strings.HasSuffix(r.URL.Path, "/git-receive-pack") {
+		if r.Transport == TransportHTTP && !r.IsPushRequest() {
 			r.push = &gitproto.Push{}
 			return
 		}
@@ -148,6 +161,23 @@ func (r *Request) Push() (*gitproto.Push, error) {
 	return r.push, r.pushErr
 }
 
+func (r *Request) isPushContent() bool {
+	if r.Header == nil {
+		return false
+	}
+	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return ct == gitproto.PushContentType
+}
+
+// IsPushRequest reports whether an HTTP request carries push commands (as
+// opposed to the ref advertisement that precedes a push).
+func (r *Request) IsPushRequest() bool {
+	if r.Transport != TransportHTTP || r.Method != http.MethodPost || r.URL == nil {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimRight(r.URL.Path, "/"), "/git-receive-pack") || r.isPushContent()
+}
+
 // GraphQL summarizes the GraphQL operations in the request, or returns nil
 // if it isn't a GraphQL request.
 func (r *Request) GraphQL() ([]gql.Operation, error) {
@@ -161,10 +191,32 @@ func (r *Request) GraphQL() ([]gql.Operation, error) {
 			if r.gqlErr != nil {
 				return
 			}
+			if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+				body, r.gqlErr = gunzip(body)
+				if r.gqlErr != nil {
+					return
+				}
+			}
 		}
 		r.gqlOps, r.gqlErr = gql.FromHTTP(r.Method, r.URL.Query(), r.Header, body)
 	})
 	return r.gqlOps, r.gqlErr
+}
+
+// gunzip decodes a gzip body, bounded like any inspected body.
+func gunzip(b []byte) ([]byte, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, fmt.Errorf("gzip body: %w", err)
+	}
+	out, err := io.ReadAll(io.LimitReader(zr, MaxBuffer+1))
+	if err != nil {
+		return nil, fmt.Errorf("gzip body: %w", err)
+	}
+	if len(out) > MaxBuffer {
+		return nil, ErrTooLarge
+	}
+	return out, nil
 }
 
 // Describe is a short human description, used in prompts and logs.

@@ -23,10 +23,18 @@ func (s *Server) forwarder(svc *policy.Service, origLength int64) chain.Handler 
 		header.Del("Accept-Encoding")
 		u := *req.URL
 		if name := svc.Config.Credential; name != "" {
+			if header.Get("Upgrade") != "" && !svc.Config.AllowUpgrade {
+				return synthetic(http.StatusForbidden, "agent-bouncer: protocol upgrades on "+svc.Config.Name+" are not allowed (the upgraded stream can't be filtered); set allow_upgrade: true to permit"), nil
+			}
+			if u.Scheme != "https" && !svc.Config.Insecure {
+				return synthetic(http.StatusForbidden, "agent-bouncer: refusing to send credentials over plain HTTP; use https (or set insecure: true on the service for local development)"), nil
+			}
 			secret, err := s.Creds.Get(req.Ctx, name)
 			if err != nil {
-				s.logf("%v", err)
-				return synthetic(http.StatusBadGateway, "agent-bouncer: credential unavailable: "+err.Error()), nil
+				// Source errors can carry password-manager output; keep them
+				// in the daemon log, not in the agent's response.
+				s.logf("credential for service %s: %v", svc.Config.Name, err)
+				return synthetic(http.StatusBadGateway, "agent-bouncer: credential for "+svc.Config.Name+" is unavailable; see the bouncer log"), nil
 			}
 			Inject(header, &u, name, svc.Config.Inject.For(req.Git() != nil), secret)
 		}
@@ -71,15 +79,14 @@ func synthetic(status int, msg string) *chain.Response {
 // Inject replaces the credential's placeholder in authentication headers
 // (including inside Basic auth), then applies the explicit inject spec.
 //
-// Placeholders are deliberately not replaced in other headers, the query
-// string or the body: an API that stores and echoes those back (an issue
-// title, say) would hand the agent the real secret.
+// Placeholders are replaced only in Authorization, Private-Token, the
+// spec's header, and headers it lists in placeholder_headers. Anywhere an
+// API might store and echo a value back (other headers, the query string,
+// the body), a substituted secret would end up readable by the agent.
 func Inject(h http.Header, u *url.URL, credName string, spec *config.Inject, secret string) {
 	ph := config.Placeholder(credName)
-	for k, vs := range h {
-		if !authHeader(k) {
-			continue
-		}
+	for _, k := range placeholderHeaders(spec) {
+		vs := h.Values(k)
 		for i, v := range vs {
 			if strings.HasPrefix(v, "Basic ") && strings.EqualFold(k, "Authorization") {
 				if raw, err := base64.StdEncoding.DecodeString(v[len("Basic "):]); err == nil && strings.Contains(string(raw), ph) {
@@ -114,16 +121,14 @@ func Inject(h http.Header, u *url.URL, credName string, spec *config.Inject, sec
 	}
 }
 
-// authHeader reports whether a header plausibly carries credentials.
-func authHeader(name string) bool {
-	n := strings.ToLower(name)
-	if n == "authorization" {
-		return true
-	}
-	for _, s := range []string{"token", "auth", "key", "secret", "password", "credential"} {
-		if strings.Contains(n, s) {
-			return true
+// placeholderHeaders lists the headers in which placeholders are replaced.
+func placeholderHeaders(spec *config.Inject) []string {
+	out := []string{"Authorization", "Private-Token"}
+	if spec != nil {
+		if spec.Header != "" {
+			out = append(out, spec.Header)
 		}
+		out = append(out, spec.PlaceholderHeaders...)
 	}
-	return false
+	return out
 }

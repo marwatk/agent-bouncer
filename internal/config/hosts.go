@@ -7,13 +7,18 @@ import (
 
 // HostMatches reports whether host (optionally host:port) matches any pattern.
 // Patterns are exact hostnames or "*.example.com" (one or more labels), and
-// may carry a ":port" suffix that must then match exactly.
+// may carry a ":port" suffix that must then match exactly. A pattern without
+// a port matches only the default HTTPS port (or a bare host, as for SSH),
+// so "gitlab.com" never matches plain-HTTP gitlab.com:80.
 func HostMatches(patterns []string, hostport string) bool {
 	host, port := SplitHostPort(hostport)
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	for _, p := range patterns {
 		ph, pp := SplitHostPort(p)
-		if pp != "" && pp != port {
+		if pp == "" {
+			pp = "443"
+		}
+		if port != "" && pp != port {
 			continue
 		}
 		if strings.HasPrefix(ph, "*.") {
