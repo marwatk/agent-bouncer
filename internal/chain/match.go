@@ -34,6 +34,22 @@ func CheckPath(decoded string) error {
 	return nil
 }
 
+// CheckMethod rejects HTTP methods that aren't upper-case tokens. Method
+// names are case-sensitive, but some servers fold them, so a method that
+// differs only in case from one a rule names could be evaluated as one
+// method and executed as another.
+func CheckMethod(m string) error {
+	if m == "" {
+		return errors.New("empty method")
+	}
+	for _, c := range m {
+		if c < 'A' || c > 'Z' {
+			return fmt.Errorf("non-canonical method %q (methods must be upper-case letters)", m)
+		}
+	}
+	return nil
+}
+
 // Glob matches a slash-separated name against a pattern where "*" matches
 // within one segment (path.Match syntax) and "**" matches any number of
 // segments, including none.

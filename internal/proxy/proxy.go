@@ -334,7 +334,11 @@ func (s *Server) intercept(w http.ResponseWriter, r *http.Request, sess *chain.S
 		s.Audit.Write(e)
 	}()
 
-	if err := chain.CheckPath(u.Path); err != nil {
+	err := chain.CheckMethod(r.Method)
+	if err == nil {
+		err = chain.CheckPath(u.Path)
+	}
+	if err != nil {
 		e.Decision, e.By, e.Reason, e.Status = "deny", "bouncer", err.Error(), 400
 		writeDenial(w, &chain.Denial{By: "bouncer", Reason: err.Error(), Status: 400})
 		return

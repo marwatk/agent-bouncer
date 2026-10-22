@@ -249,6 +249,14 @@ func TestCheckPath(t *testing.T) {
 	}
 }
 
+func TestCheckMethod(t *testing.T) {
+	for m, ok := range map[string]bool{"GET": true, "DELETE": true, "PROPFIND": true, "delete": false, "Delete": false, "GET ": false, "": false, "M-SEARCH": false} {
+		if got := CheckMethod(m) == nil; got != ok {
+			t.Errorf("CheckMethod(%q) ok=%v want %v", m, got, ok)
+		}
+	}
+}
+
 func TestGlob(t *testing.T) {
 	for _, c := range []struct {
 		pat, name string

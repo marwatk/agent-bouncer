@@ -24,6 +24,9 @@ cases:
   - name: deleting the project is off-limits
     request: {method: DELETE, url: "https://gitlab.com/api/v4/projects/1234"}
     expect: deny
+  - name: lower-case method can't slip past the method deny rule
+    request: {method: delete, url: "https://gitlab.com/api/v4/projects/1234"}
+    expect: deny
   - name: closing an issue is fine
     request: {method: PUT, url: "https://gitlab.com/api/v4/projects/1234/issues/5", body: "{}"}
     expect: allow
