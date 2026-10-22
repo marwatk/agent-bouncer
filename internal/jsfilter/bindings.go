@@ -294,6 +294,14 @@ func toBytes(i *instance, v goja.Value) ([]byte, error) {
 	return []byte(s.String()), nil
 }
 
+// nonNil makes a missing list encode as [] rather than null.
+func nonNil(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
+}
+
 func textOf(b []byte) string {
 	if utf8.Valid(b) {
 		return string(b)
@@ -311,7 +319,7 @@ func (i *instance) headers(h http.Header) *goja.Object {
 		}
 		return i.vm.ToValue(strings.Join(v, ", "))
 	})
-	o.Set("getAll", func(name string) goja.Value { return i.plain(h.Values(name)) })
+	o.Set("getAll", func(name string) goja.Value { return i.plain(nonNil(h.Values(name))) })
 	o.Set("has", func(name string) bool { return len(h.Values(name)) > 0 })
 	o.Set("set", func(name, value string) { h.Set(name, value) })
 	o.Set("append", func(name, value string) { h.Add(name, value) })
@@ -405,7 +413,7 @@ func (i *instance) wrapRequest(req *chain.Request) *goja.Object {
 			}
 			return vm.ToValue(q.Get(k))
 		})
-		qo.Set("getAll", func(k string) goja.Value { return i.plain(q[k]) })
+		qo.Set("getAll", func(k string) goja.Value { return i.plain(nonNil(q[k])) })
 		qo.Set("has", func(k string) bool { return q.Has(k) })
 		o.Set("query", qo)
 		o.Set("headers", i.headers(req.Header))
