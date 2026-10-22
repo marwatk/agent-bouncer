@@ -38,6 +38,18 @@ cases:
       url: https://api.github.com/graphql
       body: '{"extensions":{"persistedQuery":{"sha256Hash":"abc"}}}'
     expect: deny
+  - name: GitHub Enterprise path is guarded too
+    request:
+      method: POST
+      url: https://ghe.example.com/api/graphql
+      body: '{"query":"mutation { deleteRepository(input:{repositoryId:\"x\"}) { clientMutationId } }"}'
+    expect: deny
+  - name: trailing slash is guarded too
+    request:
+      method: POST
+      url: https://api.github.com/graphql/
+      body: '{"query":"mutation { deleteRepository(input:{repositoryId:\"x\"}) { clientMutationId } }"}'
+    expect: deny
   - name: REST calls are not this filter's business
     request: {method: DELETE, url: "https://api.github.com/repos/o/r/issues/comments/1"}
     expect: allow
