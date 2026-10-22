@@ -100,12 +100,21 @@ func (s *Server) Serve(l net.Listener) error {
 type conn struct {
 	ctx      context.Context
 	s        *Server
+	token    string
 	sess     *chain.Session
 	prof     *policy.Profile
 	svc      *policy.SSHService
 	host     string
 	user     string
 	upstream *ssh.Client
+}
+
+// valid reports whether the connection's session is still live. It's
+// re-checked per channel so a revoked or expired session can't keep opening
+// new channels on an existing connection.
+func (cn *conn) valid() bool {
+	_, ok := cn.s.Backend.Session(cn.token)
+	return ok
 }
 
 func (s *Server) handle(c net.Conn) {
@@ -154,6 +163,11 @@ func (s *Server) handle(c net.Conn) {
 	defer sc.Close()
 	go cn.globalRequests(reqs)
 	for nc := range chans {
+		if !cn.valid() {
+			nc.Reject(ssh.Prohibited, "agent-bouncer: session is no longer valid")
+			sc.Close()
+			continue
+		}
 		switch nc.ChannelType() {
 		case "session":
 			go cn.session(nc)
@@ -172,7 +186,7 @@ func (s *Server) prepare(ctx context.Context, p *Preamble) (*conn, error) {
 	if !ok || p.Token == "" {
 		return nil, errors.New("unknown session token (run the agent via `bouncer exec` or source `bouncer env`)")
 	}
-	cn := &conn{ctx: ctx, s: s, sess: sess}
+	cn := &conn{ctx: ctx, s: s, token: p.Token, sess: sess}
 	prof, ok := s.Backend.Profile(sess.Profile)
 	if !ok {
 		return cn, errors.New("session profile no longer exists")

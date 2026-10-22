@@ -43,6 +43,7 @@ type env struct {
 	client   *http.Client
 	audit    []audit.Entry
 	port     string
+	backend  *fakeBackend
 }
 
 func setup(t *testing.T, profileYAML string) *env {
@@ -90,8 +91,9 @@ profiles:
 	tr := NewTransport()
 	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	log, _ := audit.Open("", func(en audit.Entry) { e.audit = append(e.audit, en) })
+	e.backend = &fakeBackend{set: set, sessions: map[string]*chain.Session{"tok123": {ID: "s1", Profile: "p"}}}
 	srv := &Server{
-		Backend:   &fakeBackend{set: set, sessions: map[string]*chain.Session{"tok123": {ID: "s1", Profile: "p"}}},
+		Backend:   e.backend,
 		CA:        authority,
 		Creds:     creds.NewStore(cfg.Credentials),
 		Audit:     log,
@@ -367,7 +369,6 @@ func TestUpgradePassthrough(t *testing.T) {
 	rwc.Close()
 }
 
-
 func TestInjectQueryPreservesAndScrubs(t *testing.T) {
 	e := setup(t, `
   p:
@@ -392,5 +393,19 @@ func TestInjectQueryPreservesAndScrubs(t *testing.T) {
 	resp.Body.Close()
 	if loc := resp.Header.Get("Location"); strings.Contains(loc, "real-secret") {
 		t.Fatalf("secret leaked in Location: %q", loc)
+	}
+}
+
+func TestRevocationReachesLiveTunnel(t *testing.T) {
+	e := setup(t, scopedProfile)
+	base := "https://localhost:" + e.port
+	// First request over the keep-alive tunnel succeeds.
+	if status, _ := e.get(t, "GET", base+"/api/v4/projects/group%2Fproj", nil); status != 200 {
+		t.Fatalf("first request: %d", status)
+	}
+	// Revoke the session; the already-open tunnel must stop serving.
+	delete(e.backend.sessions, "tok123")
+	if status, _ := e.get(t, "GET", base+"/api/v4/projects/group%2Fproj", nil); status != http.StatusProxyAuthRequired {
+		t.Fatalf("after revocation the tunnel still served: %d", status)
 	}
 }

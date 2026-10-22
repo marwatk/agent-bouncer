@@ -27,10 +27,13 @@ import (
 	"github.com/marwatk/agent-bouncer/internal/policy"
 )
 
-type backend struct{ set *policy.Set }
+type backend struct {
+	set     *policy.Set
+	revoked *bool
+}
 
 func (b backend) Session(tok string) (*chain.Session, bool) {
-	if tok == "tok" {
+	if tok == "tok" && !(b.revoked != nil && *b.revoked) {
 		return &chain.Session{ID: "s1", Profile: "p"}, true
 	}
 	return nil, false
@@ -120,7 +123,9 @@ func (u *upstream) serve(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	}
 }
 
-func setup(t *testing.T) (*upstream, string, *ca.Authority) {
+func setup(t *testing.T) (*upstream, string, *ca.Authority) { u, a, c, _ := setupR(t); return u, a, c }
+
+func setupR(t *testing.T) (*upstream, string, *ca.Authority, *bool) {
 	dir := t.TempDir()
 	_, ck, _ := ed25519.GenerateKey(rand.Reader)
 	block, _ := ssh.MarshalPrivateKey(ck, "")
@@ -158,11 +163,12 @@ profiles:
 	}
 	authority, _ := ca.LoadOrCreate(filepath.Join(dir, "state"))
 	log, _ := audit.Open("", nil)
-	srv := &Server{Backend: backend{set}, CA: authority, Creds: creds.NewStore(cfg.Credentials), Audit: log}
+	revoked := new(bool)
+	srv := &Server{Backend: backend{set: set, revoked: revoked}, CA: authority, Creds: creds.NewStore(cfg.Credentials), Audit: log}
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
 	t.Cleanup(func() { l.Close() })
 	go srv.Serve(l)
-	return up, l.Addr().String(), authority
+	return up, l.Addr().String(), authority, revoked
 }
 
 func client(t *testing.T, bouncer string, authority *ca.Authority, token string) (*ssh.Client, error) {
@@ -305,7 +311,7 @@ profiles:
 		t.Fatal(err)
 	}
 	set, _ := policy.Compile(cfg, &chain.Env{}, nil)
-	srv := &Server{Backend: backend{set}, Creds: creds.NewStore(cfg.Credentials)}
+	srv := &Server{Backend: backend{set: set}, Creds: creds.NewStore(cfg.Credentials)}
 	_, err = srv.prepare(context.Background(), &Preamble{Token: "tok", Host: "example.com", Port: 2222, User: "git"})
 	if err == nil || !strings.Contains(err.Error(), "port 2222 is not allowed") {
 		t.Fatalf("err = %v", err)
@@ -316,5 +322,22 @@ func TestSSHUnknownToken(t *testing.T) {
 	_, addr, authority := setup(t)
 	if _, err := client(t, addr, authority, "nope"); err == nil || !strings.Contains(err.Error(), "unknown session token") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSSHRevocationStopsNewChannels(t *testing.T) {
+	_, addr, authority, revoked := setupR(t)
+	cl, err := client(t, addr, authority, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	if out, _, err := run(t, cl, "echo hi", nil); err != nil || out != "hi\n" {
+		t.Fatalf("first exec: %q %v", out, err)
+	}
+	*revoked = true
+	// The connection is still open, but a new channel must be refused.
+	if _, err := cl.NewSession(); err == nil {
+		t.Fatal("opened a new channel after the session was revoked")
 	}
 }

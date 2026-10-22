@@ -86,20 +86,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// proxySession authenticates a proxy client from Proxy-Authorization. The
-// token is the Basic auth password (or the username if the password is empty).
-func (s *Server) proxySession(r *http.Request) (*chain.Session, bool) {
-	token := ""
+// proxyToken extracts the session token from Proxy-Authorization (the Basic
+// password, or the username if the password is empty).
+func (s *Server) proxyToken(r *http.Request) string {
 	if h := r.Header.Get("Proxy-Authorization"); strings.HasPrefix(h, "Basic ") {
 		if raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(h, "Basic ")); err == nil {
 			user, pass, _ := strings.Cut(string(raw), ":")
-			token = pass
-			if token == "" {
-				token = user
+			if pass != "" {
+				return pass
 			}
+			return user
 		}
 	}
-	return s.Backend.Session(token)
+	return ""
+}
+
+func (s *Server) proxySession(r *http.Request) (*chain.Session, bool) {
+	return s.Backend.Session(s.proxyToken(r))
 }
 
 func proxyAuthRequired(w http.ResponseWriter) {
@@ -202,10 +205,29 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		tlsConn.Close()
 		return
 	}
+	token := s.proxyToken(r)
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, ir *http.Request) {
 			if h, _ := config.SplitHostPort(ir.Host); ir.Host != "" && !strings.EqualFold(h, host) {
 				http.Error(w, "agent-bouncer: Host header does not match CONNECT target", http.StatusMisdirectedRequest)
+				return
+			}
+			// Re-resolve the session every request: a long-lived tunnel must
+			// stop working once its session is revoked or expires, and must
+			// pick up profile changes from a config reload.
+			sess, ok := s.Backend.Session(token)
+			if !ok {
+				http.Error(w, "agent-bouncer: session is no longer valid", http.StatusProxyAuthRequired)
+				return
+			}
+			prof, ok := s.Backend.Profile(sess.Profile)
+			if !ok {
+				http.Error(w, "agent-bouncer: session profile no longer exists", http.StatusForbidden)
+				return
+			}
+			svc := prof.MatchService(target)
+			if svc == nil {
+				http.Error(w, "agent-bouncer: host is no longer an intercepted service", http.StatusForbidden)
 				return
 			}
 			u := &url.URL{Scheme: "https", Host: hostForURL(target, "443"), Path: ir.URL.Path, RawPath: ir.URL.RawPath, RawQuery: ir.URL.RawQuery}
