@@ -218,6 +218,15 @@ func (i *instance) hostCall(mayWait bool, fn func() (goja.Value, error)) goja.Va
 	return i.resolved(v)
 }
 
+// guarded is hostCall for a closure bound to generation gen: if the request
+// it belongs to has finished, it rejects instead of acting.
+func (i *instance) guarded(gen uint64, mayWait bool, fn func() (goja.Value, error)) goja.Value {
+	if !i.live(gen) {
+		return i.rejected(fmt.Errorf("request object used after its request finished"))
+	}
+	return i.hostCall(mayWait, fn)
+}
+
 // plain converts a Go value to a native JS value via JSON, so arrays and
 // objects behave exactly like JS ones.
 func (i *instance) plain(v any) goja.Value {
@@ -336,38 +345,40 @@ func (i *instance) headers(h http.Header) *goja.Object {
 	return o
 }
 
-// body wraps a chain.Body.
+// body wraps a chain.Body. Methods are bound to the current generation so a
+// filter can't stash the object and read or mutate a later request's body.
 func (i *instance) body(b *chain.Body) *goja.Object {
 	if b == nil {
 		b = chain.BytesBody(nil)
 	}
+	gen := i.gen
 	o := i.vm.NewObject()
 	o.Set("peek", func(n int) goja.Value {
-		return i.hostCall(!b.Buffered(n), func() (goja.Value, error) {
+		return i.guarded(gen, !b.Buffered(n), func() (goja.Value, error) {
 			p, err := b.Peek(n)
 			return i.bytesValue(p), err
 		})
 	})
 	o.Set("peekText", func(n int) goja.Value {
-		return i.hostCall(!b.Buffered(n), func() (goja.Value, error) {
+		return i.guarded(gen, !b.Buffered(n), func() (goja.Value, error) {
 			p, err := b.Peek(n)
 			return i.vm.ToValue(textOf(p)), err
 		})
 	})
 	o.Set("bytes", func() goja.Value {
-		return i.hostCall(!b.Complete(), func() (goja.Value, error) {
+		return i.guarded(gen, !b.Complete(), func() (goja.Value, error) {
 			p, err := b.ReadAll()
 			return i.bytesValue(p), err
 		})
 	})
 	o.Set("text", func() goja.Value {
-		return i.hostCall(!b.Complete(), func() (goja.Value, error) {
+		return i.guarded(gen, !b.Complete(), func() (goja.Value, error) {
 			p, err := b.ReadAll()
 			return i.vm.ToValue(textOf(p)), err
 		})
 	})
 	o.Set("json", func() goja.Value {
-		return i.hostCall(!b.Complete(), func() (goja.Value, error) {
+		return i.guarded(gen, !b.Complete(), func() (goja.Value, error) {
 			p, err := b.ReadAll()
 			if err != nil {
 				return nil, err
@@ -376,6 +387,9 @@ func (i *instance) body(b *chain.Body) *goja.Object {
 		})
 	})
 	o.Set("set", func(v goja.Value) error {
+		if !i.live(gen) {
+			return fmt.Errorf("body used after its request finished")
+		}
 		data, err := toBytes(i, v)
 		if err != nil {
 			return err
@@ -472,7 +486,11 @@ func bodyComplete(req *chain.Request) bool { return req.Body == nil || req.Body.
 
 func (i *instance) nextFunc(req *chain.Request, next chain.Handler) goja.Value {
 	called := false
+	gen := i.gen
 	return i.vm.ToValue(func(goja.FunctionCall) goja.Value {
+		if !i.live(gen) {
+			return i.rejected(fmt.Errorf("next() used after its request finished"))
+		}
 		if called {
 			return i.rejected(fmt.Errorf("next() called more than once"))
 		}

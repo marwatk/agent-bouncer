@@ -305,3 +305,54 @@ func TestConcurrentRequestsUseSeparateVMs(t *testing.T) {
 		}
 	}
 }
+
+func sessReq(t *testing.T, id string) *chain.Request {
+	r := req(t, "GET", "https://x/", nil)
+	r.Session = &chain.Session{ID: id}
+	return r
+}
+
+func TestNoCrossSessionStateLeak(t *testing.T) {
+	// A filter that stashes the previous request's session id in a module
+	// variable must never reveal session A's data to session B.
+	f := load(t, `import { respond } from "bouncer"; let last = "none";
+export default { onRequest(req) { const p = last; last = req.session.id; return respond(200, p); } };`, Options{})
+	h := chain.Build([]chain.Filter{f}, upstream("ok"))
+	for i := 0; i < 5; i++ {
+		resp, _ := h(sessReq(t, "session-A"))
+		b, _ := io.ReadAll(resp.Body.Reader())
+		if string(b) == "session-A" {
+			continue // A seeing its own prior value is fine
+		}
+	}
+	resp, _ := h(sessReq(t, "session-B"))
+	b, _ := io.ReadAll(resp.Body.Reader())
+	if string(b) == "session-A" {
+		t.Fatalf("session B saw session A's state: %q", b)
+	}
+}
+
+func TestStaleNextCannotForward(t *testing.T) {
+	// A filter that saves next() during a denied request and calls it on a
+	// later request must not forward the earlier request upstream.
+	var forwarded int
+	term := func(*chain.Request) (*chain.Response, error) {
+		forwarded++
+		return &chain.Response{Status: 200}, nil
+	}
+	f := load(t, `import { deny } from "bouncer"; let saved = null;
+export default { async onRequest(req, next) {
+  if (!saved) { saved = next; return deny("first"); }
+  try { await saved(req); } catch (e) { return deny("stale: " + e); }
+  return deny("second");
+} };`, Options{})
+	h := chain.Build([]chain.Filter{f}, term)
+	h(sessReq(t, "s1"))
+	resp, _ := h(sessReq(t, "s1"))
+	if forwarded != 0 {
+		t.Fatalf("stale next() forwarded %d requests upstream", forwarded)
+	}
+	if resp.Denial == nil || !strings.Contains(resp.Denial.Reason, "stale") {
+		t.Fatalf("expected stale-next denial, got %+v", resp.Denial)
+	}
+}
