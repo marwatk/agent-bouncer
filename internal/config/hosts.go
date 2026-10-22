@@ -12,9 +12,10 @@ import (
 // so "gitlab.com" never matches plain-HTTP gitlab.com:80.
 func HostMatches(patterns []string, hostport string) bool {
 	host, port := SplitHostPort(hostport)
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host = asciiLower(strings.TrimSuffix(host, "."))
 	for _, p := range patterns {
 		ph, pp := SplitHostPort(p)
+		ph = asciiLower(ph)
 		if pp == "" {
 			pp = "443"
 		}
@@ -32,6 +33,18 @@ func HostMatches(patterns []string, hostport string) bool {
 		}
 	}
 	return false
+}
+
+// asciiLower lowercases ASCII letters only, leaving other bytes unchanged,
+// so no non-ASCII rune can case-fold onto an ASCII hostname.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 32
+		}
+	}
+	return string(b)
 }
 
 // SplitHostPort splits "host:port", tolerating a missing port and IPv6 brackets.

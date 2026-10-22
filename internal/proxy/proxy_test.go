@@ -57,6 +57,11 @@ func setup(t *testing.T, profileYAML string) *env {
 			conn.Close()
 			return
 		}
+		if r.URL.Path == "/redirect" {
+			// Echo the URL (query included) back to the client.
+			http.Redirect(w, r, "/new?"+r.URL.RawQuery, http.StatusMovedPermanently)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		fmt.Fprintf(w, "widget=%s auth=%s private=%s path=%s query=%s body=%s", r.Header.Get("X-Widget-Key"), r.Header.Get("Authorization"), r.Header.Get("Private-Token"), r.URL.EscapedPath(), r.URL.RawQuery, body)
 	}))
@@ -360,4 +365,32 @@ func TestUpgradePassthrough(t *testing.T) {
 		t.Fatalf("echo: %q", buf)
 	}
 	rwc.Close()
+}
+
+
+func TestInjectQueryPreservesAndScrubs(t *testing.T) {
+	e := setup(t, `
+  p:
+    services:
+      - name: api
+        hosts: [localhost]
+        credential: tok
+        inject: {query: api_key}
+`)
+	// Malformed-but-forwarded pairs survive unmangled, secret appended.
+	_, body := e.get(t, "GET", "https://localhost:"+e.port+"/x?a=1;b=2&q=%2B", nil)
+	if !strings.Contains(body, "query=a=1;b=2&q=%2B&api_key=real-secret") {
+		t.Fatalf("query mangled: %s", body)
+	}
+	// A redirect that echoes the URL must not leak the secret.
+	req, _ := http.NewRequest("GET", "https://localhost:"+e.port+"/redirect?a=1", nil)
+	e.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := e.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if loc := resp.Header.Get("Location"); strings.Contains(loc, "real-secret") {
+		t.Fatalf("secret leaked in Location: %q", loc)
+	}
 }

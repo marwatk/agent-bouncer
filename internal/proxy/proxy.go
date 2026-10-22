@@ -338,6 +338,9 @@ func (s *Server) intercept(w http.ResponseWriter, r *http.Request, sess *chain.S
 	if err == nil && (r.Method == http.MethodConnect || r.Method == http.MethodTrace) {
 		err = fmt.Errorf("method %s is not allowed to an intercepted service", r.Method)
 	}
+	if err == nil && !strings.HasPrefix(u.Path, "/") {
+		err = fmt.Errorf("request target %q is not an origin-form path", u.Path)
+	}
 	if err == nil {
 		err = chain.CheckPath(u.Path)
 	}
