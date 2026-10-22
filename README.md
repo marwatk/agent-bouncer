@@ -182,8 +182,12 @@ A rule's matchers are ANDed together:
 | `ssh: {kinds, command}` | SSH channel kind and exec command regex |
 
 Actions are `allow`, `deny` and `ask`. Before any rules run, bouncer rejects
-paths whose meaning could differ between it and the upstream: dot segments
-(literal or encoded), empty segments, backslashes and NULs.
+requests whose meaning could differ between it and the upstream:
+* paths with dot segments (literal or encoded), empty segments, backslashes or NULs
+* methods that aren't upper-case
+* method overrides (`X-HTTP-Method-Override` and similar headers, `_method`
+  query or form fields). Checking form bodies means POSTed forms are buffered,
+  up to 16 MiB.
 
 ## Writing filters
 

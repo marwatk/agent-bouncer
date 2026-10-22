@@ -257,6 +257,39 @@ func TestCheckMethod(t *testing.T) {
 	}
 }
 
+func TestCheckMethodOverride(t *testing.T) {
+	form := func(body string) *Request {
+		r := httpReq(t, "POST", "https://gitlab.com/api/v4/projects/1", []byte(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return r
+	}
+	hdr := httpReq(t, "POST", "https://gitlab.com/x", nil)
+	hdr.Header.Set("X-HTTP-Method-Override", "DELETE")
+	multi := httpReq(t, "POST", "https://gitlab.com/x", []byte("--b\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nDELETE\r\n--b--"))
+	multi.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+	for name, c := range map[string]struct {
+		req *Request
+		ok  bool
+	}{
+		"header":     {hdr, false},
+		"query":      {httpReq(t, "POST", "https://gitlab.com/x?_method=DELETE", nil), false},
+		"form":       {form("a=1&_method=DELETE"), false},
+		"multipart":  {multi, false},
+		"plain form": {form("title=hello&description=_method"), true},
+		"json":       {httpReq(t, "POST", "https://gitlab.com/x", []byte(`{"_method":"DELETE"}`)), true},
+	} {
+		if got := CheckMethodOverride(c.req) == nil; got != c.ok {
+			t.Errorf("%s: ok=%v want %v", name, got, c.ok)
+		}
+	}
+	// Inspection must not consume the body.
+	r := form("title=hello")
+	CheckMethodOverride(r)
+	if b, _ := io.ReadAll(r.Body.Reader()); string(b) != "title=hello" {
+		t.Fatalf("body consumed: %q", b)
+	}
+}
+
 func TestGlob(t *testing.T) {
 	for _, c := range []struct {
 		pat, name string
