@@ -187,7 +187,17 @@ func (f *Filter) newInstance() (*instance, error) {
 	if err := inst.installHost(); err != nil {
 		return nil, err
 	}
-	if _, err := vm.RunProgram(f.prog); err != nil {
+	// Module top-level code runs under the CPU budget too, so a filter whose
+	// top level loops can't run unbounded when a new VM is created.
+	inst.wd.start(f.opts.Timeout)
+	_, err := vm.RunProgram(f.prog)
+	inst.wd.stop()
+	vm.ClearInterrupt()
+	if err != nil {
+		var ie *goja.InterruptedError
+		if errors.As(err, &ie) {
+			return nil, fmt.Errorf("filter top-level code exceeded %s CPU budget", f.opts.Timeout)
+		}
 		return nil, err
 	}
 	mod := vm.Get(globalName)
@@ -370,8 +380,14 @@ func (w *watchdog) resume() {
 	defer w.mu.Unlock()
 	w.paused--
 	if w.paused == 0 {
+		// The budget is already spent; don't hand back a fresh slice, or a
+		// loop of fast host calls would never be interrupted.
+		if w.remaining <= 0 {
+			go w.fire()
+			return
+		}
 		w.started = time.Now()
-		w.timer = time.AfterFunc(max(w.remaining, time.Millisecond), w.fire)
+		w.timer = time.AfterFunc(w.remaining, w.fire)
 	}
 }
 

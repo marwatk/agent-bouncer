@@ -356,3 +356,37 @@ export default { async onRequest(req, next) {
 		t.Fatalf("expected stale-next denial, got %+v", resp.Denial)
 	}
 }
+
+func TestSpinningTopLevelIsBounded(t *testing.T) {
+	// A filter whose module top level never finishes must not hang; it's
+	// bounded by the CPU budget and fails to load.
+	dir := t.TempDir()
+	p := writeFilter(t, dir, "spin.ts", `const t0 = Date.now(); while (Date.now() - t0 < 5000) {}
+export default { onRequest(req, next) { return next(req); } };`)
+	start := time.Now()
+	_, err := Load(Options{Path: p, Timeout: 100 * time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "top-level") {
+		t.Fatalf("expected a top-level budget error, got %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("top-level spin was not interrupted near the budget")
+	}
+}
+
+func TestFastAskLoopHitsBudget(t *testing.T) {
+	env := &chain.Env{Approver: approver(func(chain.AskRequest) bool { return true })}
+	f := load(t, `import { ask } from "bouncer";
+export default { async onRequest(req, next) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 5000) { await ask("x"); for (let j = 0; j < 50; j++) {} }
+  return next(req);
+} };`, Options{Timeout: 50 * time.Millisecond, Env: env})
+	start := time.Now()
+	resp, _ := chain.Build([]chain.Filter{f}, upstream("ok"))(req(t, "GET", "https://x/", nil))
+	if resp.Denial == nil {
+		t.Fatal("fast ask() loop was allowed")
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("ask() loop ran %v past a 50ms budget", time.Since(start))
+	}
+}
