@@ -2,6 +2,7 @@ package ca
 
 import (
 	"crypto/x509"
+	"fmt"
 	"os"
 	"testing"
 
@@ -59,5 +60,20 @@ func TestSSHHostCert(t *testing.T) {
 	}
 	if err := checker.CheckHostKey("github.com:22", nil, cert); err == nil {
 		t.Fatal("cert should not be valid for another host")
+	}
+}
+
+func TestLeafCacheBounded(t *testing.T) {
+	a, err := LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxLeaves+50; i++ {
+		if _, err := a.Leaf(fmt.Sprintf("h%d.example.com", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(a.leaves); n > maxLeaves {
+		t.Fatalf("leaf cache grew to %d", n)
 	}
 }

@@ -31,6 +31,7 @@ const (
 	sshCAFile   = "ssh-ca"
 	sshHostFile = "ssh-host-key"
 	leafTTL     = 7 * 24 * time.Hour
+	maxLeaves   = 1024
 )
 
 // Authority holds the TLS and SSH CAs.
@@ -40,7 +41,8 @@ type Authority struct {
 	certPEM []byte
 	key     crypto.Signer
 
-	leaves sync.Map // host -> *leaf
+	leafMu sync.Mutex
+	leaves map[string]*leaf
 
 	sshCA      ssh.Signer
 	sshHostKey ssh.Signer
@@ -57,7 +59,7 @@ func LoadOrCreate(dir string) (*Authority, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	a := &Authority{dir: dir}
+	a := &Authority{dir: dir, leaves: map[string]*leaf{}}
 	if err := a.loadTLS(); err != nil {
 		return nil, err
 	}
@@ -145,11 +147,11 @@ func (a *Authority) createTLS(cp, kp string) error {
 
 // Leaf returns a TLS certificate for host signed by the CA, cached in memory.
 func (a *Authority) Leaf(host string) (*tls.Certificate, error) {
-	if v, ok := a.leaves.Load(host); ok {
-		l := v.(*leaf)
-		if time.Until(l.expiry) > time.Hour {
-			return l.cert, nil
-		}
+	a.leafMu.Lock()
+	l, ok := a.leaves[host]
+	a.leafMu.Unlock()
+	if ok && time.Until(l.expiry) > time.Hour {
+		return l.cert, nil
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -174,7 +176,17 @@ func (a *Authority) Leaf(host string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	cert := &tls.Certificate{Certificate: [][]byte{der, a.cert.Raw}, PrivateKey: key}
-	a.leaves.Store(host, &leaf{cert: cert, expiry: tmpl.NotAfter})
+	a.leafMu.Lock()
+	// Wildcard services can see unboundedly many hostnames; keep the cache
+	// bounded (any evicted entry is simply re-minted on next use).
+	for h := range a.leaves {
+		if len(a.leaves) < maxLeaves {
+			break
+		}
+		delete(a.leaves, h)
+	}
+	a.leaves[host] = &leaf{cert: cert, expiry: tmpl.NotAfter}
+	a.leafMu.Unlock()
 	return cert, nil
 }
 
