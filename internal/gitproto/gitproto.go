@@ -158,7 +158,10 @@ func ParsePush(r io.Reader) (*Push, error) {
 	// ReadPkt never reads ahead, so the packfile after the commands is untouched.
 	lr := &io.LimitedReader{R: r, N: MaxCommandBytes}
 	p := &Push{}
-	first := true
+	empty := true
+	// Capabilities ride on the first command line, which may follow any
+	// number of "shallow" lines.
+	seenCommand := false
 	inCert := false
 	for {
 		payload, special, err := ReadPkt(lr)
@@ -166,12 +169,13 @@ func ParsePush(r io.Reader) (*Push, error) {
 			if lr.N <= 0 {
 				return nil, errors.New("push command list exceeds size limit")
 			}
-			if err == io.EOF && first {
+			if err == io.EOF && empty {
 				// Empty body (e.g. a ref advertisement probe).
 				return p, nil
 			}
 			return nil, fmt.Errorf("reading push commands: %w", err)
 		}
+		empty = false
 		if special == "flush" {
 			break
 		}
@@ -179,8 +183,14 @@ func ParsePush(r io.Reader) (*Push, error) {
 			return nil, fmt.Errorf("unexpected %s packet in push commands", special)
 		}
 		line := strings.TrimSuffix(string(payload), "\n")
-		if first {
-			first = false
+		if !inCert && strings.HasPrefix(line, "shallow ") {
+			if seenCommand {
+				return nil, errors.New("shallow line after push commands")
+			}
+			continue
+		}
+		if !seenCommand {
+			seenCommand = true
 			if i := strings.IndexByte(line, 0); i >= 0 {
 				p.Capabilities = strings.Fields(line[i+1:])
 				line = line[:i]
@@ -200,9 +210,6 @@ func ParsePush(r io.Reader) (*Push, error) {
 			if u, ok := parseCommand(line); ok {
 				p.Updates = append(p.Updates, u)
 			}
-			continue
-		}
-		if strings.HasPrefix(line, "shallow ") {
 			continue
 		}
 		u, ok := parseCommand(line)
@@ -231,7 +238,7 @@ func ParsePush(r io.Reader) (*Push, error) {
 
 func parseCommand(line string) (RefUpdate, bool) {
 	parts := strings.SplitN(line, " ", 3)
-	if len(parts) != 3 || !oidRe.MatchString(parts[0]) || !oidRe.MatchString(parts[1]) || parts[2] == "" {
+	if len(parts) != 3 || !oidRe.MatchString(parts[0]) || !oidRe.MatchString(parts[1]) || !validRefName(parts[2]) {
 		return RefUpdate{}, false
 	}
 	u := RefUpdate{OldOID: parts[0], NewOID: parts[1], Ref: parts[2], Type: UpdateUpdate}
@@ -242,6 +249,21 @@ func parseCommand(line string) (RefUpdate, bool) {
 		u.Type = UpdateDelete
 	}
 	return u, true
+}
+
+// validRefName applies the character rules of git check-ref-format, so a
+// ref name a filter sees is exactly the ref the server would update.
+func validRefName(ref string) bool {
+	if ref == "" || !strings.HasPrefix(ref, "refs/") {
+		return false
+	}
+	for _, c := range ref {
+		if c < 0x20 || c == 0x7f || strings.ContainsRune(" ~^:?*[\\", c) {
+			return false
+		}
+	}
+	return !strings.Contains(ref, "..") && !strings.Contains(ref, "@{") && !strings.Contains(ref, "//") &&
+		!strings.HasSuffix(ref, "/") && !strings.HasSuffix(ref, ".lock") && !strings.HasSuffix(ref, ".")
 }
 
 // HasCapability reports whether the client requested a capability.
