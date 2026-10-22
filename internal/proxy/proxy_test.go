@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -273,6 +274,16 @@ func TestNoCredentialsOverPlainHTTP(t *testing.T) {
 	e.get(t, "GET", "http://localhost:"+port+"/x", nil)
 	if len(gotAuth) != 1 || gotAuth[0] != "Bearer real-secret" {
 		t.Fatalf("insecure: true should allow injection; upstream saw %q", gotAuth)
+	}
+}
+
+func TestCredentialErrorsStayInTheLog(t *testing.T) {
+	e := setup(t, scopedProfile)
+	t.Setenv("BOUNCER_TEST_TOKEN", "")
+	os.Unsetenv("BOUNCER_TEST_TOKEN")
+	_, body := e.get(t, "GET", "https://localhost:"+e.port+"/api/v4/projects/group%2Fproj", nil)
+	if !strings.Contains(body, "unavailable; see the bouncer log") || strings.Contains(body, "BOUNCER_TEST_TOKEN") {
+		t.Fatalf("agent saw credential error details: %s", body)
 	}
 }
 
