@@ -318,6 +318,23 @@ func TestUpgradeRefusedOnCredentialedService(t *testing.T) {
 	}
 }
 
+func TestUnexpectedUpstreamUpgradeRefused(t *testing.T) {
+	// The upstream answers a plain request with 101; without a client
+	// upgrade on a credentialed service, bouncer must not splice it.
+	e := setup(t, `
+  p:
+    services:
+      - name: api
+        hosts: [localhost]
+        credential: tok
+        allow_upgrade: true
+`)
+	status, _ := e.get(t, "GET", "https://localhost:"+e.port+"/upgrade", nil)
+	if status == http.StatusSwitchingProtocols {
+		t.Fatalf("spliced an unrequested upgrade: %d", status)
+	}
+}
+
 func TestUpgradePassthrough(t *testing.T) {
 	e := setup(t, `
   p:

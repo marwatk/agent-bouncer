@@ -61,6 +61,13 @@ func (s *Server) forwarder(svc *policy.Service, origLength int64) chain.Handler 
 		}
 		r := &chain.Response{Status: resp.StatusCode, Header: resp.Header}
 		if resp.StatusCode == http.StatusSwitchingProtocols {
+			// Only splice a 101 if the client actually asked to upgrade and
+			// the service permits it; otherwise an upstream could hand the
+			// agent a raw stream on a request that was never meant to upgrade.
+			if header.Get("Upgrade") == "" || (svc.Config.Credential != "" && !svc.Config.AllowUpgrade) {
+				resp.Body.Close()
+				return synthetic(http.StatusBadGateway, "agent-bouncer: unexpected protocol upgrade from upstream"), nil
+			}
 			if rwc, ok := resp.Body.(io.ReadWriteCloser); ok {
 				r.Upgrade = rwc
 				return r, nil
