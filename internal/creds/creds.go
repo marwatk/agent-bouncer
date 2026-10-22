@@ -4,6 +4,7 @@ package creds
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/marwatk/agent-bouncer/internal/config"
+	"github.com/marwatk/agent-bouncer/internal/creds/bitwarden"
 )
 
 // KeyringService is the service name under which secrets are stored in the OS keyring.
@@ -40,6 +42,34 @@ type cached struct {
 
 func NewStore(creds map[string]*config.Credential) *Store {
 	return &Store{creds: creds, cache: map[string]cached{}, fetch: map[string]*sync.Mutex{}}
+}
+
+// ConfigureBitwarden sets where the process stores its Bitwarden device id
+// and refresh token, and where unlock progress is logged. The decrypted
+// vault is kept in memory only. Call this before the first fetch.
+func ConfigureBitwarden(stateDir string, logf func(string, ...any)) {
+	bitwarden.Configure(bitwarden.Options{StateDir: stateDir, Logf: logf})
+}
+
+// Prepare unlocks every Bitwarden vault the credential set uses, so the
+// master password is requested once at startup rather than mid-request.
+// Vaults stay unlocked until the process exits.
+func (s *Store) Prepare(ctx context.Context, creds map[string]*config.Credential) error {
+	var accounts []bitwarden.Account
+	for _, c := range creds {
+		if c == nil || c.Source != "bitwarden" || c.Bitwarden == nil {
+			continue
+		}
+		accounts = append(accounts, bitwarden.Account{
+			Email:       c.Bitwarden.Email,
+			Server:      c.Bitwarden.Server,
+			PasswordEnv: c.Bitwarden.PasswordEnv,
+		})
+	}
+	if len(accounts) == 0 {
+		return nil
+	}
+	return bitwarden.Unlock(ctx, accounts)
 }
 
 // Update swaps in a new credential set (on config reload), dropping cache
@@ -138,6 +168,17 @@ func fetch(ctx context.Context, c *config.Credential) (string, error) {
 			return "", fmt.Errorf("%s: %w", c.Command[0], err)
 		}
 		return strings.TrimRight(string(out), "\r\n"), nil
+	case "bitwarden":
+		bw := c.Bitwarden
+		if bw == nil {
+			return "", errors.New("bitwarden block is missing")
+		}
+		return bitwarden.Get(ctx, bitwarden.Query{
+			Account: bitwarden.Account{Email: bw.Email, Server: bw.Server, PasswordEnv: bw.PasswordEnv},
+			Item:    bw.Item,
+			Folder:  bw.Folder,
+			Field:   bw.Field,
+		})
 	}
 	return "", fmt.Errorf("unsupported source %q", c.Source)
 }

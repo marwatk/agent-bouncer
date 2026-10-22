@@ -78,3 +78,27 @@ func TestParseRejectsUnknownFields(t *testing.T) {
 		t.Fatal("expected error for misspelled field")
 	}
 }
+
+func TestBitwardenCredential(t *testing.T) {
+	cfg, err := Parse([]byte(`
+credentials:
+  gl:
+    source: bitwarden
+    bitwarden:
+      email: User@Example.com
+      item: GitLab
+`), "x.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bw := cfg.Credentials["gl"].Bitwarden
+	if bw == nil || bw.Field != "password" || bw.Item != "GitLab" || bw.Email != "User@Example.com" {
+		t.Fatalf("%+v", bw)
+	}
+	if _, err := Parse([]byte("credentials:\n  gl: {source: bitwarden}\n"), "x.yaml"); err == nil {
+		t.Fatal("expected missing item to fail")
+	}
+	if _, err := Parse([]byte("credentials:\n  gl: {source: keyring, bitwarden: {email: a@b.c, item: b}}\n"), "x.yaml"); err == nil {
+		t.Fatal("expected source mismatch to fail")
+	}
+}
