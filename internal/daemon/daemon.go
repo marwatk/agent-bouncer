@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,9 @@ type Options struct {
 	// for display (they are always written to the audit log too).
 	Logf     func(format string, args ...any)
 	Decision func(audit.Entry)
+	// Provided are secrets supplied at startup (--creds-from). They override
+	// configured sources and are held only in memory.
+	Provided map[string]string
 }
 
 // Daemon is a running bouncer.
@@ -141,6 +145,7 @@ func New(opts Options) (*Daemon, error) {
 		},
 	}
 	d.creds = creds.NewStore(cfg.Credentials)
+	d.creds.SetProvided(opts.Provided)
 	if err := d.apply(cfg); err != nil {
 		return nil, err
 	}
@@ -155,7 +160,45 @@ func (d *Daemon) Config() *config.Config {
 	return d.cfg
 }
 
+// checkProvided ensures startup-provided secrets and the config agree:
+// every provided name is a configured credential, and every source:
+// provided credential has a value.
+func (d *Daemon) checkProvided(cfg *config.Config) error {
+	var unknown, missing []string
+	for name := range d.opts.Provided {
+		if _, ok := cfg.Credentials[name]; !ok {
+			unknown = append(unknown, name)
+		}
+	}
+	for name, c := range cfg.Credentials {
+		if _, ok := d.opts.Provided[name]; c.Source == "provided" && !ok {
+			missing = append(missing, name)
+		}
+	}
+	// "a: x" + "b: y" printed without a newline between them parses as a
+	// single value for a; catch it when b is a configured name.
+	for name, v := range d.opts.Provided {
+		for other := range cfg.Credentials {
+			if other != name && strings.Contains(v, other+": ") {
+				return fmt.Errorf("--creds-from value for %s contains %q; is a newline missing between entries?", name, other+": ")
+			}
+		}
+	}
+	sort.Strings(unknown)
+	sort.Strings(missing)
+	switch {
+	case len(unknown) > 0:
+		return fmt.Errorf("--creds-from names credentials not in the config: %s", strings.Join(unknown, ", "))
+	case len(missing) > 0:
+		return fmt.Errorf("credentials with source: provided have no value from --creds-from: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 func (d *Daemon) apply(cfg *config.Config) error {
+	if err := d.checkProvided(cfg); err != nil {
+		return err
+	}
 	set, err := policy.Compile(cfg, d.env, d.kv)
 	if err != nil {
 		return err
