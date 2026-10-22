@@ -305,6 +305,12 @@ Read this before relying on bouncer.
   multicast addresses. The check runs on the resolved IP, so DNS tricks
   don't get around it. Set `allow_private: true` on a profile to lift it.
   Configured services are unaffected.
+* **Keep the proxy on loopback where you can.** Session tokens travel in
+  cleartext proxy headers, so binding `listen:` to `0.0.0.0` or a LAN
+  interface exposes them to that network. A container or VM can't reach the
+  host's loopback, so for those, bind to the specific bridge or host-only
+  interface the sandbox uses and firewall it to that sandbox.
+  `anonymous_profile` is refused on non-loopback addresses.
 * **Filters are trusted code.** They run in-process with no sandbox, by
   design for v1. Only load filters you'd run yourself.
 * **Scoping has edges.** GraphQL can't be scoped by URL; allowing it opens

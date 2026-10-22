@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -464,6 +465,10 @@ func (c *Config) normalize() error {
 		if _, ok := c.Profiles[c.AnonymousProfile]; !ok {
 			return fmt.Errorf("anonymous_profile %q does not exist", c.AnonymousProfile)
 		}
+		// Tokenless access is only tolerable when only this machine can connect.
+		if !loopback(c.Listen) {
+			return fmt.Errorf("anonymous_profile requires a loopback listen address, got %q: anyone who can reach the proxy would get that profile's credentials", c.Listen)
+		}
 	}
 	return nil
 }
@@ -630,6 +635,15 @@ func normalizeRules(rules []Rule) error {
 		}
 	}
 	return nil
+}
+
+func loopback(addr string) bool {
+	host, _ := SplitHostPort(addr)
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ResolvedProfile returns a profile with its extends chain flattened: parent

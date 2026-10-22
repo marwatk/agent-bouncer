@@ -81,3 +81,15 @@ func TestParseRejectsUnknownFields(t *testing.T) {
 		t.Fatal("expected error for misspelled field")
 	}
 }
+
+func TestAnonymousProfileNeedsLoopback(t *testing.T) {
+	base := "anonymous_profile: p\nprofiles:\n  p: {}\n"
+	if _, err := Parse([]byte(base), "c.yaml"); err != nil {
+		t.Fatalf("default loopback listen rejected: %v", err)
+	}
+	for _, listen := range []string{"0.0.0.0:8228", "192.168.1.5:8228", ":8228"} {
+		if _, err := Parse([]byte("listen: "+listen+"\n"+base), "c.yaml"); err == nil {
+			t.Errorf("listen %s with anonymous_profile accepted", listen)
+		}
+	}
+}
