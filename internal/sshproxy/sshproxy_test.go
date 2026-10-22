@@ -83,7 +83,15 @@ func startUpstream(t *testing.T, clientKey ssh.PublicKey) *upstream {
 
 func (u *upstream) serve(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer ch.Close()
+	var env []string
 	for r := range reqs {
+		if r.Type == "env" {
+			var e struct{ Name, Value string }
+			ssh.Unmarshal(r.Payload, &e)
+			env = append(env, e.Name+"="+e.Value)
+			r.Reply(true, nil)
+			continue
+		}
 		if r.Type != "exec" {
 			r.Reply(false, nil)
 			continue
@@ -94,6 +102,8 @@ func (u *upstream) serve(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		switch {
 		case p.Command == "echo hi":
 			io.WriteString(ch, "hi\n")
+		case p.Command == "env":
+			io.WriteString(ch, strings.Join(env, ","))
 		case strings.HasPrefix(p.Command, "git-receive-pack"):
 			ch.Write(gitproto.EncodePkt(strings.Repeat("a", 40) + " refs/heads/main\x00report-status\n"))
 			ch.Write(gitproto.Flush)
@@ -240,6 +250,27 @@ func TestSSHPolicy(t *testing.T) {
 
 	if _, err := cl.Dial("tcp", "10.0.0.1:80"); err == nil {
 		t.Fatal("port forward should be denied")
+	}
+}
+
+func TestSSHEnvAllowlist(t *testing.T) {
+	_, addr, authority := setup(t)
+	cl, err := client(t, addr, authority, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	s, _ := cl.NewSession()
+	defer s.Close()
+	if err := s.Setenv("GIT_PROTOCOL", "version=2"); err != nil {
+		t.Fatalf("allowlisted env refused: %v", err)
+	}
+	if err := s.Setenv("LD_PRELOAD", "/tmp/x.so"); err == nil {
+		t.Fatal("non-allowlisted env accepted")
+	}
+	out, err := s.Output("env")
+	if err != nil || string(out) != "GIT_PROTOCOL=version=2" {
+		t.Fatalf("upstream saw env %q (%v)", out, err)
 	}
 }
 

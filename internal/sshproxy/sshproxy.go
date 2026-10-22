@@ -359,14 +359,27 @@ func (cn *conn) session(nc ssh.NewChannel) {
 	}
 	defer ch.Close()
 	var setup []*ssh.Request
+	env := map[string]string{}
 	var up ssh.Channel
 	var started bool
 	for r := range reqs {
 		switch r.Type {
-		case "pty-req", "env":
+		case "pty-req":
 			setup = append(setup, r)
 			if r.WantReply {
 				r.Reply(true, nil)
+			}
+		case "env":
+			// Only allowlisted variables reach upstream; an arbitrary env
+			// var could change what the remote command does.
+			var e struct{ Name, Value string }
+			ok := ssh.Unmarshal(r.Payload, &e) == nil && cn.svc.Config.EnvAllowed(e.Name)
+			if ok {
+				setup = append(setup, r)
+				env[e.Name] = e.Value
+			}
+			if r.WantReply {
+				r.Reply(ok, nil)
 			}
 		case "exec", "shell", "subsystem":
 			if started {
@@ -374,7 +387,7 @@ func (cn *conn) session(nc ssh.NewChannel) {
 				continue
 			}
 			started = true
-			up = cn.start(ch, r, setup)
+			up = cn.start(ch, r, setup, env)
 			if up == nil {
 				return
 			}
@@ -400,8 +413,11 @@ func (cn *conn) session(nc ssh.NewChannel) {
 
 // start decides on an exec/shell/subsystem request and, if allowed, wires up
 // the upstream channel. It returns nil if the session is over.
-func (cn *conn) start(ch ssh.Channel, r *ssh.Request, setup []*ssh.Request) ssh.Channel {
+func (cn *conn) start(ch ssh.Channel, r *ssh.Request, setup []*ssh.Request, env map[string]string) ssh.Channel {
 	req := cn.request("")
+	if len(env) > 0 {
+		req.SSH.Env = env
+	}
 	switch r.Type {
 	case "shell":
 		req.SSH.Kind = config.SSHKindShell

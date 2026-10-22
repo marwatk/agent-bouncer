@@ -107,6 +107,8 @@ declare module "bouncer" {
     subsystem?: string;
     /** host:port for port forwards. */
     target?: string;
+    /** Environment variables the client set that the service's `env` allowlist lets through. */
+    env?: Record<string, string>;
   }
 
   export interface SshRequest extends BaseRequest {

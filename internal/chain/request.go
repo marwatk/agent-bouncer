@@ -39,6 +39,8 @@ type SSHInfo struct {
 	Subsystem string `json:"subsystem,omitempty"`
 	// Target is host:port for port forwards.
 	Target string `json:"target,omitempty"`
+	// Env holds the allowlisted environment variables the client set.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 // Request is what filters and rules evaluate. For HTTP it is an intercepted

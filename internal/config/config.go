@@ -215,6 +215,9 @@ type SSHService struct {
 	Allow []string `yaml:"allow"`
 	// KnownHosts files used to verify the upstream host key. Default ~/.ssh/known_hosts.
 	KnownHosts []string `yaml:"known_hosts"`
+	// Env lists environment variables the agent may set on the upstream
+	// session (a trailing * matches a prefix). Default: GIT_PROTOCOL, LANG, LC_*.
+	Env []string `yaml:"env"`
 	// HostKey optionally pins the upstream host key (authorized_keys format).
 	HostKey string      `yaml:"host_key"`
 	Default string      `yaml:"default"`
@@ -230,6 +233,20 @@ func (s *SSHService) DefaultAction() string {
 		return ActionDeny
 	}
 	return ActionAllow
+}
+
+// EnvAllowed reports whether the agent may set an environment variable.
+func (s *SSHService) EnvAllowed(name string) bool {
+	allow := s.Env
+	if allow == nil {
+		allow = []string{"GIT_PROTOCOL", "LANG", "LC_*"}
+	}
+	for _, a := range allow {
+		if a == name || (strings.HasSuffix(a, "*") && strings.HasPrefix(name, a[:len(a)-1])) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *SSHService) Allows(kind string) bool {
