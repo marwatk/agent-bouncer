@@ -284,7 +284,9 @@ session, `[n]` deny, or `[d]` deny for the session. A desktop notification
 fires too. From another terminal, use `bouncer approvals` and
 `bouncer approve|deny <id> [--session]`. Unanswered asks are denied after
 `approvals.timeout` (default 2m). Concurrent identical asks from one session
-share a single prompt.
+share a single prompt; different requests always get their own. "For the
+session" covers identical requests only, unless a filter passes an explicit
+`key` to `ask()` to group related requests on purpose.
 
 ## Threat model and limits
 

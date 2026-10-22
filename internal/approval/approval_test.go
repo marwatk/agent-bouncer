@@ -62,3 +62,50 @@ func TestTimeoutDenies(t *testing.T) {
 		t.Fatal("timed-out approval still pending")
 	}
 }
+
+func TestDifferentRequestsDontShareAPrompt(t *testing.T) {
+	m := NewManager(time.Minute)
+	sess := &chain.Session{ID: "s1"}
+	ask := func(req string, key string, out chan bool) {
+		ok, _ := m.Ask(context.Background(), chain.AskRequest{Session: sess, Prompt: "Let the agent in?", Request: req, Key: key})
+		out <- ok
+	}
+	harmless, dangerous := make(chan bool, 1), make(chan bool, 1)
+	go ask("ssh agent@sandbox exec: ls", "", harmless)
+	go ask("ssh agent@sandbox exec: rm -rf /srv", "", dangerous)
+	time.Sleep(20 * time.Millisecond)
+	list := m.List()
+	if len(list) != 2 {
+		t.Fatalf("expected two separate prompts, got %d", len(list))
+	}
+	for _, p := range list {
+		m.Resolve(p.ID, p.Request == "ssh agent@sandbox exec: ls", true)
+	}
+	if !<-harmless || <-dangerous {
+		t.Fatal("answers applied to the wrong requests")
+	}
+	// The remembered allow (no explicit key) covers only the identical request.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if ok, _ := m.Ask(ctx, chain.AskRequest{Session: sess, Prompt: "Let the agent in?", Request: "ssh agent@sandbox exec: cat /etc/shadow"}); ok {
+		t.Fatal("remembered approval leaked to a different request")
+	}
+	if ok, _ := m.Ask(context.Background(), chain.AskRequest{Session: sess, Prompt: "Let the agent in?", Request: "ssh agent@sandbox exec: ls"}); !ok {
+		t.Fatal("identical request should reuse the remembered approval")
+	}
+
+	// An explicit key groups on purpose: separate prompts, and a
+	// session-wide answer to one settles the others.
+	a, b := make(chan bool, 1), make(chan bool, 1)
+	go ask("push 1", "push-limit", a)
+	go ask("push 2", "push-limit", b)
+	time.Sleep(20 * time.Millisecond)
+	list = m.List()
+	if len(list) != 2 {
+		t.Fatalf("explicit key: expected two prompts, got %d", len(list))
+	}
+	m.Resolve(list[0].ID, true, true)
+	if !<-a || !<-b {
+		t.Fatal("session-wide approval should settle both")
+	}
+}

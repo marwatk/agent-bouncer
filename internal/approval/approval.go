@@ -25,9 +25,10 @@ type Pending struct {
 	Created      time.Time `json:"created"`
 	Expires      time.Time `json:"expires"`
 
-	key    string
-	done   chan struct{}
-	result bool
+	key     string // remember key: session + ask key
+	joinKey string // remember key + request text
+	done    chan struct{}
+	result  bool
 }
 
 // Event notifies subscribers of changes.
@@ -66,28 +67,34 @@ func rememberKey(sessionID, key string) string { return sessionID + "\x00" + key
 // Ask blocks until the request is approved, denied, times out, or ctx ends.
 // Identical concurrent asks from one session share a single prompt.
 func (m *Manager) Ask(ctx context.Context, a chain.AskRequest) (bool, error) {
+	// Without an explicit key, a decision covers only this exact request:
+	// keying on the prompt alone would let one approval of a static prompt
+	// cover unrelated requests.
 	key := a.Key
 	if key == "" {
-		key = a.Prompt
+		key = a.Prompt + "\x00" + a.Request
 	}
 	sid, label, profile := "", "", ""
 	if a.Session != nil {
 		sid, label, profile = a.Session.ID, a.Session.Label, a.Session.Profile
 	}
 	rk := rememberKey(sid, key)
+	// Only identical requests share a pending prompt, so the human always
+	// sees the request their answer applies to.
+	jk := rk + "\x00" + a.Request
 
 	m.mu.Lock()
 	if v, ok := m.remembered[rk]; ok {
 		m.mu.Unlock()
 		return v, nil
 	}
-	p, existing := m.byKey[rk]
+	p, existing := m.byKey[jk]
 	if !existing {
 		now := time.Now()
 		p = &Pending{ID: newID(), Prompt: a.Prompt, Request: a.Request, Filter: a.Filter, SessionID: sid,
-			SessionLabel: label, Profile: profile, Created: now, Expires: now.Add(m.timeout), key: rk, done: make(chan struct{})}
+			SessionLabel: label, Profile: profile, Created: now, Expires: now.Add(m.timeout), key: rk, joinKey: jk, done: make(chan struct{})}
 		m.pending[p.ID] = p
-		m.byKey[rk] = p
+		m.byKey[jk] = p
 		m.broadcast(Event{Type: "pending", Pending: *p})
 	}
 	timeout := time.Until(p.Expires)
@@ -133,14 +140,23 @@ func (m *Manager) resolve(p *Pending, allow, remember bool) {
 	if _, ok := m.pending[p.ID]; !ok {
 		return
 	}
-	delete(m.pending, p.ID)
-	delete(m.byKey, p.key)
+	settle := func(q *Pending) {
+		delete(m.pending, q.ID)
+		delete(m.byKey, q.joinKey)
+		q.result = allow
+		close(q.done)
+		m.broadcast(Event{Type: "resolved", Pending: *q, Allowed: allow})
+	}
+	settle(p)
 	if remember {
 		m.remembered[p.key] = allow
+		// A session-wide answer also settles other pending asks it covers.
+		for _, q := range m.pending {
+			if q.key == p.key {
+				settle(q)
+			}
+		}
 	}
-	p.result = allow
-	close(p.done)
-	m.broadcast(Event{Type: "resolved", Pending: *p, Allowed: allow})
 }
 
 // List returns pending approvals, oldest first.
