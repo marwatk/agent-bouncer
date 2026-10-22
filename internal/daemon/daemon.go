@@ -207,7 +207,7 @@ func (d *Daemon) apply(cfg *config.Config) error {
 	d.Approvals.SetTimeout(cfg.Approvals.TimeoutOrDefault())
 	if cfg.Approvals.NotifyEnabled() {
 		d.Approvals.Notify = func(p approval.Pending) {
-			notify.Send("agent-bouncer: approval needed", p.Prompt+"\n"+p.Request)
+			notify.Send("agent-bouncer: approval needed", approval.Display(p.Prompt, 150)+"\n"+approval.Display(p.Request, 150))
 		}
 	} else {
 		d.Approvals.Notify = nil
