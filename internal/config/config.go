@@ -147,8 +147,11 @@ type Service struct {
 	Name  string   `yaml:"name"`
 	Hosts []string `yaml:"hosts"`
 	// Credential to inject (optional; a service with no credential is still filtered).
-	Credential string  `yaml:"credential"`
-	Inject     *Inject `yaml:"inject"`
+	Credential string `yaml:"credential"`
+	// Insecure allows injecting the credential into plain-HTTP requests.
+	// Only for local development; never set it for a remote host.
+	Insecure bool    `yaml:"insecure"`
+	Inject   *Inject `yaml:"inject"`
 	// Default action when no rule matches. If omitted: deny when rules exist, allow otherwise.
 	Default string      `yaml:"default"`
 	Rules   []Rule      `yaml:"rules"`

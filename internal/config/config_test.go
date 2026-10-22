@@ -16,6 +16,9 @@ func TestHostMatches(t *testing.T) {
 		{[]string{"*.github.com"}, "a.b.github.com", true},
 		{[]string{"example.com:8443"}, "example.com:443", false},
 		{[]string{"example.com:8443"}, "example.com:8443", true},
+		{[]string{"gitlab.com"}, "gitlab.com:80", false},
+		{[]string{"gitlab.com"}, "gitlab.com:8443", false},
+		{[]string{"gitlab.com"}, "gitlab.com", true},
 	}
 	for _, c := range cases {
 		if got := HostMatches(c.pats, c.host); got != c.want {

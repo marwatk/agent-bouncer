@@ -23,6 +23,9 @@ func (s *Server) forwarder(svc *policy.Service, origLength int64) chain.Handler 
 		header.Del("Accept-Encoding")
 		u := *req.URL
 		if name := svc.Config.Credential; name != "" {
+			if u.Scheme != "https" && !svc.Config.Insecure {
+				return synthetic(http.StatusForbidden, "agent-bouncer: refusing to send credentials over plain HTTP; use https (or set insecure: true on the service for local development)"), nil
+			}
 			secret, err := s.Creds.Get(req.Ctx, name)
 			if err != nil {
 				s.logf("%v", err)

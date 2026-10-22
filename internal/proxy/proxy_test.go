@@ -63,6 +63,8 @@ func setup(t *testing.T, profileYAML string) *env {
 	_, e.port, _ = net.SplitHostPort(e.upstream.Listener.Addr().String())
 
 	t.Setenv("BOUNCER_TEST_TOKEN", "real-secret")
+	// Patterns without a port mean :443; pin the test upstream's port.
+	profileYAML = strings.ReplaceAll(profileYAML, "hosts: [localhost]", `hosts: ["localhost:`+e.port+`"]`)
 	cfg, err := config.Parse([]byte(`
 credentials:
   tok: {source: env, env: BOUNCER_TEST_TOKEN}
@@ -240,6 +242,37 @@ func TestMissingSessionToken(t *testing.T) {
 	_, err := c.Get("https://localhost:" + e.port + "/")
 	if err == nil || !strings.Contains(err.Error(), "Proxy Authentication Required") {
 		t.Fatalf("expected 407, got %v", err)
+	}
+}
+
+func TestNoCredentialsOverPlainHTTP(t *testing.T) {
+	var gotAuth []string
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+	}))
+	defer plain.Close()
+	_, port, _ := net.SplitHostPort(plain.Listener.Addr().String())
+	e := setup(t, `
+  p:
+    allow_private: true
+    services:
+      - name: api
+        hosts: ["127.0.0.1:`+port+`"]
+        credential: tok
+        inject: {bearer: true}
+      - name: dev
+        hosts: ["localhost:`+port+`"]
+        credential: tok
+        insecure: true
+        inject: {bearer: true}
+`)
+	status, _ := e.get(t, "GET", plain.URL+"/x", nil)
+	if status != 403 {
+		t.Fatalf("plain HTTP to a credentialed service: %d", status)
+	}
+	e.get(t, "GET", "http://localhost:"+port+"/x", nil)
+	if len(gotAuth) != 1 || gotAuth[0] != "Bearer real-secret" {
+		t.Fatalf("insecure: true should allow injection; upstream saw %q", gotAuth)
 	}
 }
 

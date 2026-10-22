@@ -125,7 +125,8 @@ in a container. Mark a credential `source: provided` to require it from
 **Injection.** `inject:` sets `bearer: true`, `basic: {username}`,
 `header` + `value` (with `{{secret}}`), or `query: param`. `inject.git`
 overrides this for git smart-HTTP, which usually needs Basic auth even when
-the API takes a token header. Without `inject`, bouncer swaps the
+the API takes a token header. Credentials are never sent over plain HTTP
+unless the service sets `insecure: true` (for local development only). Without `inject`, bouncer swaps the
 credential's placeholder (`bouncer-placeholder-<name>`) for the real secret,
 but only inside authentication headers. That restriction is deliberate: an
 API that stores and echoes back other fields (an issue title, say) would
@@ -142,7 +143,7 @@ profiles:
     filters: [filters/redact-response.ts]   # every intercepted request in this profile
     services:
       - name: gitlab
-        hosts: [gitlab.com]                 # exact, *.wildcard, optional :port
+        hosts: [gitlab.com]                 # exact or *.wildcard; no port means :443
         credential: gitlab
         inject: {header: PRIVATE-TOKEN, git: {basic: {username: oauth2}}}
         filters:
