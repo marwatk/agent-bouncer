@@ -87,6 +87,9 @@ type NewSession struct {
 	SSHAddr   string `json:"ssh_addr"`
 	// Placeholders maps environment variable names to placeholder values.
 	Placeholders map[string]string `json:"placeholders"`
+	// SSHHosts lists every configured SSH service host pattern, the only
+	// hosts the generated known_hosts trusts the bouncer SSH CA for.
+	SSHHosts []string `json:"ssh_hosts"`
 }
 
 // Runtime describes a running daemon; written to the state dir so clients
@@ -307,6 +310,24 @@ func (d *Daemon) Placeholders() map[string]string {
 			out[k] = c.Placeholder()
 		}
 	}
+	return out
+}
+
+// SSHHosts lists the host patterns of every configured SSH service.
+func (d *Daemon) SSHHosts() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range d.Config().Profiles {
+		for _, s := range p.SSH {
+			for _, h := range s.Hosts {
+				if !seen[h] {
+					seen[h] = true
+					out = append(out, h)
+				}
+			}
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 

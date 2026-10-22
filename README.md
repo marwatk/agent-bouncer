@@ -312,6 +312,13 @@ Read this before relying on bouncer.
   *where*). `gitlab_project` scopes *which* project; use `subpaths` rules to
   limit what the agent may do inside it. Push rejection only sees ref names,
   not history, so it can't tell a force push from a normal one.
+* **The CA can impersonate any site.** `bouncer ca install` makes the
+  bouncer CA a trusted root for your user (browsers included), and its key
+  sits in the state directory. Treat that directory like your SSH keys:
+  keep it out of backups you don't trust and away from the agent. On
+  Windows, Unix file modes don't apply, so check its ACLs. If the key leaks,
+  delete `ca.pem`/`ca-key.pem`, restart, and reinstall. The SSH CA is only
+  trusted for the configured SSH hosts.
 * **Interception is HTTP/1.1 to the client.** Upstream connections use
   HTTP/2 where available. Apps that pin certificates won't work through
   interception; tunnel them or leave them out.

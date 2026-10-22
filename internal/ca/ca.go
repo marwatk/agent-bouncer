@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -217,9 +218,18 @@ func loadOrCreateSSHKey(path string) (ssh.Signer, error) {
 	return ssh.NewSignerFromKey(priv)
 }
 
-// SSHKnownHostsLine is a known_hosts entry trusting the bouncer SSH CA for all hosts.
-func (a *Authority) SSHKnownHostsLine() string {
-	return "@cert-authority * " + string(ssh.MarshalAuthorizedKey(a.sshCA.PublicKey()))
+// SSHKnownHostsLine is a known_hosts entry trusting the bouncer SSH CA for
+// the given host patterns only (and those hosts on any port). With no
+// hosts it returns "", trusting the CA for nothing.
+func (a *Authority) SSHKnownHostsLine(hosts []string) string {
+	if len(hosts) == 0 {
+		return ""
+	}
+	var pats []string
+	for _, h := range hosts {
+		pats = append(pats, h, "["+h+"]:*")
+	}
+	return "@cert-authority " + strings.Join(pats, ",") + " " + string(ssh.MarshalAuthorizedKey(a.sshCA.PublicKey()))
 }
 
 // SSHHostSigner returns a host-certificate signer valid for host.

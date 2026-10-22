@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -75,5 +76,16 @@ func TestLeafCacheBounded(t *testing.T) {
 	}
 	if n := len(a.leaves); n > maxLeaves {
 		t.Fatalf("leaf cache grew to %d", n)
+	}
+}
+
+func TestSSHKnownHostsScoped(t *testing.T) {
+	a, _ := LoadOrCreate(t.TempDir())
+	line := a.SSHKnownHostsLine([]string{"gitlab.com", "*.dev.internal"})
+	if !strings.HasPrefix(line, "@cert-authority gitlab.com,[gitlab.com]:*,*.dev.internal,[*.dev.internal]:* ssh-ed25519 ") {
+		t.Fatalf("%q", line)
+	}
+	if a.SSHKnownHostsLine(nil) != "" {
+		t.Fatal("no hosts should trust nothing")
 	}
 }

@@ -52,7 +52,7 @@ func sessionEnv(f sessionFlags) (*client, *daemon.SessionRecord, envexport.Env, 
 		ProxyAddr: rec.ProxyAddr, SSHAddr: rec.SSHAddr, Token: rec.Token, SessionID: rec.ID,
 		CACert: authority.CertPath(), CABundle: authority.BundlePath(), Placeholders: rec.Placeholders,
 	}
-	if files, err := envexport.WriteSSHFiles(state, exe, authority.SSHKnownHostsLine()); err != nil {
+	if files, err := envexport.WriteSSHFiles(state, exe, authority.SSHKnownHostsLine(rec.SSHHosts)); err != nil {
 		fmt.Fprintf(os.Stderr, "bouncer: warning: ssh routing disabled: %v\n", err)
 	} else {
 		p.SSHConfig, p.ShimDir, p.SSHCommand = files.Config, files.ShimDir, files.Command
