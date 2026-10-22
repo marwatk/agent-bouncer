@@ -2,6 +2,7 @@ package sshproxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -271,6 +273,42 @@ func TestSSHEnvAllowlist(t *testing.T) {
 	out, err := s.Output("env")
 	if err != nil || string(out) != "GIT_PROTOCOL=version=2" {
 		t.Fatalf("upstream saw env %q (%v)", out, err)
+	}
+}
+
+func TestSSHPreambleLimits(t *testing.T) {
+	_, addr, _ := setup(t)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Write([]byte(preamblePrefix + strings.Repeat("x", maxPreamble+10)))
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatal("oversized preamble should close the connection")
+	}
+}
+
+func TestSSHPortNotAgentChosenUnlessPinned(t *testing.T) {
+	cfg, err := config.Parse([]byte(`
+credentials:
+  key: {source: env, env: UNUSED}
+profiles:
+  p:
+    ssh:
+      - name: s
+        hosts: [example.com]
+        credential: key
+`), filepath.Join(t.TempDir(), "c.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, _ := policy.Compile(cfg, &chain.Env{}, nil)
+	srv := &Server{Backend: backend{set}, Creds: creds.NewStore(cfg.Credentials)}
+	_, err = srv.prepare(context.Background(), &Preamble{Token: "tok", Host: "example.com", Port: 2222, User: "git"})
+	if err == nil || !strings.Contains(err.Error(), "port 2222 is not allowed") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
