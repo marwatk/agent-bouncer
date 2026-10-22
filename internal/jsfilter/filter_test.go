@@ -199,6 +199,18 @@ func TestTimeoutFailsClosedAndExcludesBlockedTime(t *testing.T) {
 	}
 }
 
+func TestHostCallLoopStillHitsBudget(t *testing.T) {
+	f := load(t, `export default { async onRequest(req, next) { for (;;) { await req.body.peek(1); } } };`, Options{Timeout: 100 * time.Millisecond})
+	start := time.Now()
+	resp, _ := chain.Build([]chain.Filter{f}, upstream("ok"))(req(t, "POST", "https://x/", []byte("abc")))
+	if resp.Denial == nil || !strings.Contains(resp.Denial.Reason, "CPU budget") {
+		t.Fatalf("expected budget denial, got %+v", resp.Denial)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("100ms budget took %v: in-memory host calls aren't being counted", elapsed)
+	}
+}
+
 func TestErrorsFailClosedWithSourceLocation(t *testing.T) {
 	f := load(t, `
 import { defineFilter } from "bouncer";
