@@ -63,7 +63,7 @@ config and compiles every filter.
 | Situation | Use |
 |---|---|
 | You launch the agent | `bouncer exec [--profile p] [--label l] -- <command>`: sets everything below, then revokes the session on exit |
-| The agent is launched some other way | `eval "$(bouncer env)"` (`--shell fish\|powershell\|cmd` too), then start it from that shell |
+| The agent is launched some other way | `eval "$(bouncer env)"` (`--shell fish\|powershell\|cmd` too), then start it from that shell; the session expires after `--ttl` (default 24h) |
 | The tool ignores proxy variables | Point its base URL at `$BOUNCER_BASE/<host>`, e.g. `$BOUNCER_BASE/gitlab.com/api/v4` (reverse-proxy mode; configured services only) |
 | The tool can't send proxy credentials | Set `anonymous_profile:`; any local client without a token gets that profile |
 | Your own ssh config is in play | `Include` the generated `state/ssh/config`, or use `GIT_SSH_COMMAND` from `bouncer env` |

@@ -109,3 +109,22 @@ func TestDifferentRequestsDontShareAPrompt(t *testing.T) {
 		t.Fatal("session-wide approval should settle both")
 	}
 }
+
+func TestSharedSessionsDontRemember(t *testing.T) {
+	m := NewManager(time.Minute)
+	anon := &chain.Session{ID: "anonymous", Shared: true}
+	events, cancel := m.Subscribe()
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() {
+		ok, _ := m.Ask(context.Background(), chain.AskRequest{Session: anon, Prompt: "x", Request: "r"})
+		done <- ok
+	}()
+	m.Resolve((<-events).Pending.ID, true, true)
+	<-done
+	ctx, c := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer c()
+	if ok, _ := m.Ask(ctx, chain.AskRequest{Session: anon, Prompt: "x", Request: "r"}); ok {
+		t.Fatal("approval remembered for a shared session")
+	}
+}

@@ -73,7 +73,11 @@ type SessionRecord struct {
 	chain.Session
 	Token   string    `json:"token"`
 	Created time.Time `json:"created"`
+	// Expires is zero for sessions that last until revoked.
+	Expires time.Time `json:"expires,omitzero"`
 }
+
+func (s *SessionRecord) expired() bool { return !s.Expires.IsZero() && time.Now().After(s.Expires) }
 
 // NewSession is the control API's reply to session creation: everything a
 // client needs to build the agent's environment without parsing the config.
@@ -244,10 +248,10 @@ func (d *Daemon) Session(token string) (*chain.Session, bool) {
 		if d.cfg.AnonymousProfile == "" {
 			return nil, false
 		}
-		return &chain.Session{ID: "anonymous", Label: "anonymous", Profile: d.cfg.AnonymousProfile}, true
+		return &chain.Session{ID: "anonymous", Label: "anonymous", Profile: d.cfg.AnonymousProfile, Shared: true}, true
 	}
 	s, ok := d.sessions[token]
-	if !ok {
+	if !ok || s.expired() {
 		return nil, false
 	}
 	sess := s.Session
@@ -263,7 +267,8 @@ func (d *Daemon) Profile(name string) (*policy.Profile, bool) {
 }
 
 // CreateSession registers a new agent session.
-func (d *Daemon) CreateSession(profile, label string) (*SessionRecord, error) {
+// A ttl of 0 means the session lasts until revoked.
+func (d *Daemon) CreateSession(profile, label string, ttl time.Duration) (*SessionRecord, error) {
 	d.mu.Lock()
 	if profile == "" {
 		profile = d.cfg.DefaultProfile
@@ -276,7 +281,15 @@ func (d *Daemon) CreateSession(profile, label string) (*SessionRecord, error) {
 		d.mu.Unlock()
 		return nil, fmt.Errorf("unknown profile %q", profile)
 	}
-	rec := &SessionRecord{Session: chain.Session{ID: randHex(4), Label: label, Profile: profile}, Token: randHex(24), Created: time.Now()}
+	rec := &SessionRecord{Session: chain.Session{ID: randHex(8), Label: label, Profile: profile}, Token: randHex(24), Created: time.Now()}
+	if ttl > 0 {
+		rec.Expires = rec.Created.Add(ttl)
+	}
+	for tok, s := range d.sessions {
+		if s.expired() {
+			delete(d.sessions, tok)
+		}
+	}
 	if rec.Label == "" {
 		rec.Label = rec.ID
 	}
@@ -320,6 +333,9 @@ func (d *Daemon) listSessions() []SessionRecord {
 	defer d.mu.RUnlock()
 	out := make([]SessionRecord, 0, len(d.sessions))
 	for _, s := range d.sessions {
+		if s.expired() {
+			continue
+		}
 		r := *s
 		r.Token = ""
 		out = append(out, r)

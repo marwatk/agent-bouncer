@@ -27,6 +27,9 @@ type Session struct {
 	ID      string `json:"id"`
 	Label   string `json:"label"`
 	Profile string `json:"profile"`
+	// Shared marks a session used by many clients (the anonymous profile);
+	// "for this session" approvals are not remembered for it.
+	Shared bool `json:"-"`
 }
 
 // SSHInfo describes an SSH channel request.

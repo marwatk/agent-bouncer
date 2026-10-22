@@ -27,6 +27,7 @@ type Pending struct {
 
 	key     string // remember key: session + ask key
 	joinKey string // remember key + request text
+	shared  bool   // the session is shared by many clients; don't remember
 	done    chan struct{}
 	result  bool
 }
@@ -74,9 +75,9 @@ func (m *Manager) Ask(ctx context.Context, a chain.AskRequest) (bool, error) {
 	if key == "" {
 		key = a.Prompt + "\x00" + a.Request
 	}
-	sid, label, profile := "", "", ""
+	sid, label, profile, shared := "", "", "", false
 	if a.Session != nil {
-		sid, label, profile = a.Session.ID, a.Session.Label, a.Session.Profile
+		sid, label, profile, shared = a.Session.ID, a.Session.Label, a.Session.Profile, a.Session.Shared
 	}
 	rk := rememberKey(sid, key)
 	// Only identical requests share a pending prompt, so the human always
@@ -92,7 +93,7 @@ func (m *Manager) Ask(ctx context.Context, a chain.AskRequest) (bool, error) {
 	if !existing {
 		now := time.Now()
 		p = &Pending{ID: newID(), Prompt: a.Prompt, Request: a.Request, Filter: a.Filter, SessionID: sid,
-			SessionLabel: label, Profile: profile, Created: now, Expires: now.Add(m.timeout), key: rk, joinKey: jk, done: make(chan struct{})}
+			SessionLabel: label, Profile: profile, Created: now, Expires: now.Add(m.timeout), key: rk, joinKey: jk, shared: shared, done: make(chan struct{})}
 		m.pending[p.ID] = p
 		m.byKey[jk] = p
 		m.broadcast(Event{Type: "pending", Pending: *p})
@@ -148,7 +149,7 @@ func (m *Manager) resolve(p *Pending, allow, remember bool) {
 		m.broadcast(Event{Type: "resolved", Pending: *q, Allowed: allow})
 	}
 	settle(p)
-	if remember {
+	if remember && !p.shared {
 		m.remembered[p.key] = allow
 		// A session-wide answer also settles other pending asks it covers.
 		for _, q := range m.pending {
