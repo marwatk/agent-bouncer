@@ -1,0 +1,93 @@
+# Tests for the declarative rules and filter chains in config.yaml.
+# Run with: bouncer test examples/
+config: config.yaml
+profile: default
+gitlab_project_ids:
+  mygroup/myproject: 1234
+cases:
+  - name: project API by path
+    request: {url: "https://gitlab.com/api/v4/projects/mygroup%2Fmyproject/issues"}
+    expect: allow
+  - name: project API by numeric id
+    request: {url: "https://gitlab.com/api/v4/projects/1234/merge_requests"}
+    expect: allow
+  - name: another project's API
+    request: {url: "https://gitlab.com/api/v4/projects/999/merge_requests"}
+    expect: deny
+  - name: CI variables of the in-scope project are still off-limits
+    request: {url: "https://gitlab.com/api/v4/projects/1234/variables"}
+    expect: deny
+    expect_reason: CI secrets
+  - name: adding members is off-limits
+    request: {method: POST, url: "https://gitlab.com/api/v4/projects/mygroup%2Fmyproject/members", body: "{}"}
+    expect: deny
+  - name: deleting the project is off-limits
+    request: {method: DELETE, url: "https://gitlab.com/api/v4/projects/1234"}
+    expect: deny
+  - name: closing an issue is fine
+    request: {method: PUT, url: "https://gitlab.com/api/v4/projects/1234/issues/5", body: "{}"}
+    expect: allow
+  - name: group APIs are out of scope
+    request: {url: "https://gitlab.com/api/v4/groups/mygroup/projects"}
+    expect: deny
+  - name: whoami
+    request: {url: "https://gitlab.com/api/v4/user"}
+    expect: allow
+  - name: clone over https
+    request: {method: POST, url: "https://gitlab.com/mygroup/myproject.git/git-upload-pack"}
+    expect: allow
+  - name: push a feature branch over https
+    request: {method: POST, url: "https://gitlab.com/mygroup/myproject.git/git-receive-pack", git_push: [{ref: refs/heads/feature}]}
+    expect: allow
+  - name: push to main over https (branch filter runs before rules)
+    request: {method: POST, url: "https://gitlab.com/mygroup/myproject.git/git-receive-pack", git_push: [{ref: refs/heads/main}]}
+    expect: deny
+    expect_reason: protected branch
+  - name: merge needs approval
+    request: {method: PUT, url: "https://gitlab.com/api/v4/projects/mygroup%2Fmyproject/merge_requests/3/merge"}
+    expect: deny
+    expect_asked: true
+  - name: merge approved
+    approve: true
+    request: {method: PUT, url: "https://gitlab.com/api/v4/projects/mygroup%2Fmyproject/merge_requests/3/merge"}
+    expect: allow
+  - name: profile-wide redaction applies to gitlab responses
+    request: {url: "https://gitlab.com/api/v4/projects/1234/jobs/9/trace"}
+    upstream: {headers: {Content-Type: application/json}, body: '{"value":"glpat-abcdefghijklmnopqrstuvwx"}'}
+    expect_body_excludes: [glpat-]
+  - name: github repo in scope
+    request: {url: "https://api.github.com/repos/myorg/myrepo/pulls"}
+    expect: allow
+  - name: github repo out of scope
+    request: {url: "https://api.github.com/repos/myorg/secret/pulls"}
+    expect: deny
+  - name: github graphql guard
+    request: {method: POST, url: "https://api.github.com/graphql", body: '{"query":"mutation { deleteRepository(input:{repositoryId:\"x\"}) { clientMutationId } }"}'}
+    expect: deny
+  - name: npm publish
+    request: {method: PUT, url: "https://registry.npmjs.org/pkg", body: "{}"}
+    expect: deny
+  - name: ssh push to main
+    ssh: {host: gitlab.com, user: git, command: "git-receive-pack 'mygroup/myproject.git'", git_push: [{ref: refs/heads/main}]}
+    expect: deny
+  - name: ssh clone of the project
+    ssh: {host: gitlab.com, user: git, command: "git-upload-pack 'mygroup/myproject.git'"}
+    expect: allow
+  - name: ssh clone of another project
+    ssh: {host: gitlab.com, user: git, command: "git-upload-pack 'mygroup/other.git'"}
+    expect: deny
+  - name: ssh shell on gitlab is not allowed
+    ssh: {host: gitlab.com, user: git}
+    expect: deny
+  - name: sandbox shell asks
+    ssh: {host: sandbox.dev.internal, user: agent}
+    expect: deny
+    expect_asked: true
+  - name: sandbox shell approved
+    approve: true
+    ssh: {host: sandbox.dev.internal, user: agent}
+    expect: allow
+  - name: no port forwarding through the sandbox
+    approve: true
+    ssh: {host: sandbox.dev.internal, user: agent, target: "10.0.0.5:5432"}
+    expect: deny

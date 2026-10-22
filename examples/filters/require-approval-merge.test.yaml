@@ -1,0 +1,25 @@
+filter: require-approval-merge.ts
+cases:
+  - name: gitlab merge, approved
+    approve: true
+    request: {method: PUT, url: "https://gitlab.com/api/v4/projects/mygroup%2Fmyproj/merge_requests/42/merge"}
+    expect: allow
+    expect_asked: true
+  - name: gitlab merge, refused
+    request: {method: PUT, url: "https://gitlab.com/api/v4/projects/7/merge_requests/42/merge"}
+    expect: deny
+    expect_reason: "MR !42 in 7"
+  - name: github REST merge
+    request: {method: PUT, url: "https://api.github.com/repos/octo/hello/pulls/9/merge"}
+    expect: deny
+    expect_asked: true
+  - name: github GraphQL merge
+    request:
+      method: POST
+      url: https://api.github.com/graphql
+      body: '{"query":"mutation { mergePullRequest(input:{pullRequestId:\"x\"}) { clientMutationId } }"}'
+    expect: deny
+  - name: commenting doesn't ask
+    request: {method: POST, url: "https://gitlab.com/api/v4/projects/7/merge_requests/42/notes", body: "{}"}
+    expect: allow
+    expect_asked: false

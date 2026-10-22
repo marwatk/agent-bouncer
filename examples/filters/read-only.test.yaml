@@ -1,0 +1,20 @@
+filter: read-only.ts
+filter_config:
+  except: ["POST /rest/api/3/search*"]
+cases:
+  - name: GET is fine
+    request: {url: "https://example.atlassian.net/rest/api/3/issue/ABC-1"}
+    expect: allow
+  - name: edits are refused with 405
+    request: {method: PUT, url: "https://example.atlassian.net/rest/api/3/issue/ABC-1"}
+    expect: deny
+    expect_status: 405
+  - name: search is a POST but read-only in practice
+    request: {method: POST, url: "https://example.atlassian.net/rest/api/3/search/jql"}
+    expect: allow
+  - name: git fetch is a POST but allowed
+    request: {method: POST, url: "https://gitlab.com/g/p.git/git-upload-pack"}
+    expect: allow
+  - name: git push is not
+    request: {method: POST, url: "https://gitlab.com/g/p.git/git-receive-pack", git_push: [{ref: refs/heads/x}]}
+    expect: deny

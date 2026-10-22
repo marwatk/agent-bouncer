@@ -1,0 +1,25 @@
+filter: first-100-bytes.ts
+cases:
+  - name: single-ref push to foo is caught at the start of the body
+    request:
+      method: POST
+      url: https://gitlab.com/group/proj.git/git-receive-pack
+      headers: {Content-Type: application/x-git-receive-pack-request}
+      git_push: [{ref: refs/heads/foo}]
+    expect: deny
+
+  - name: foobar is not foo
+    request:
+      method: POST
+      url: https://gitlab.com/group/proj.git/git-receive-pack
+      headers: {Content-Type: application/x-git-receive-pack-request}
+      git_push: [{ref: refs/heads/foobar}]
+    expect: allow
+
+  - name: "limitation: foo as the second ref is past the peek window and slips through (use refUpdates())"
+    request:
+      method: POST
+      url: https://gitlab.com/group/proj.git/git-receive-pack
+      headers: {Content-Type: application/x-git-receive-pack-request}
+      git_push: [{ref: refs/heads/feature}, {ref: refs/heads/foo}]
+    expect: allow

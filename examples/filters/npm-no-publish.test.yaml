@@ -1,0 +1,17 @@
+filter: npm-no-publish.ts
+cases:
+  - name: install metadata
+    request: {url: "https://registry.npmjs.org/left-pad"}
+    expect: allow
+  - name: audit is a POST and allowed
+    request: {method: POST, url: "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk", body: "{}"}
+    expect: allow
+  - name: publish
+    request: {method: PUT, url: "https://registry.npmjs.org/my-package", body: "{}"}
+    expect: deny
+  - name: unpublish
+    request: {method: DELETE, url: "https://registry.npmjs.org/my-package/-rev/3-abc"}
+    expect: deny
+  - name: token creation
+    request: {method: POST, url: "https://registry.npmjs.org/-/npm/v1/tokens", body: "{}"}
+    expect: deny

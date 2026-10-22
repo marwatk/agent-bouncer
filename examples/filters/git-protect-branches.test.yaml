@@ -1,0 +1,54 @@
+filter: git-protect-branches.ts
+filter_config:
+  branches: [main, foo, "release/*"]
+cases:
+  - name: feature branch push is allowed
+    request:
+      method: POST
+      url: https://gitlab.com/group/proj.git/git-receive-pack
+      git_push: [{ref: refs/heads/my-feature}]
+    expect: allow
+
+  - name: push to foo is blocked even when it is not the first ref
+    request:
+      method: POST
+      url: https://gitlab.com/group/proj.git/git-receive-pack
+      git_push: [{ref: refs/heads/a}, {ref: refs/heads/b}, {ref: refs/heads/foo}]
+    expect: deny
+    expect_reason: "protected branch 'foo'"
+
+  - name: release glob is protected
+    request:
+      method: POST
+      url: https://github.com/octo/repo.git/git-receive-pack
+      git_push: [{ref: refs/heads/release/2.0}]
+    expect: deny
+
+  - name: deleting a branch is blocked
+    request:
+      method: POST
+      url: https://gitlab.com/group/proj.git/git-receive-pack
+      git_push: [{ref: refs/heads/old-feature, type: delete}]
+    expect: deny
+    expect_reason: deleting
+
+  - name: tags are not branches
+    request:
+      method: POST
+      url: https://gitlab.com/group/proj.git/git-receive-pack
+      git_push: [{ref: refs/tags/main}]
+    expect: allow
+
+  - name: fetches are untouched
+    request:
+      method: POST
+      url: https://gitlab.com/group/proj.git/git-upload-pack
+    expect: allow
+
+  - name: same rule applies over ssh
+    ssh:
+      host: gitlab.com
+      user: git
+      command: "git-receive-pack 'group/proj.git'"
+      git_push: [{ref: refs/heads/main}]
+    expect: deny

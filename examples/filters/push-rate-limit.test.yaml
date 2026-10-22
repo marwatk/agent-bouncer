@@ -1,0 +1,25 @@
+# Cases run in order and share kv state.
+filter: push-rate-limit.ts
+filter_config: {max: 2, window: 1h}
+cases:
+  - name: first push
+    request: {method: POST, url: "https://gitlab.com/g/p.git/git-receive-pack", git_push: [{ref: refs/heads/a}]}
+    expect: allow
+    expect_asked: false
+  - name: ref advertisement doesn't count
+    request: {url: "https://gitlab.com/g/p.git/info/refs?service=git-receive-pack"}
+    expect: allow
+  - name: second push
+    request: {method: POST, url: "https://gitlab.com/g/p.git/git-receive-pack", git_push: [{ref: refs/heads/a}]}
+    expect: allow
+    expect_asked: false
+  - name: third push asks and the human says no
+    request: {method: POST, url: "https://gitlab.com/g/p.git/git-receive-pack", git_push: [{ref: refs/heads/a}]}
+    expect: deny
+    expect_asked: true
+    expect_status: 429
+  - name: fourth push asks and the human says yes
+    approve: true
+    request: {method: POST, url: "https://gitlab.com/g/p.git/git-receive-pack", git_push: [{ref: refs/heads/a}]}
+    expect: allow
+    expect_asked: true

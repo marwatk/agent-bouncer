@@ -1,0 +1,43 @@
+filter: github-graphql-guard.ts
+cases:
+  - name: queries pass
+    request:
+      method: POST
+      url: https://api.github.com/graphql
+      headers: {Content-Type: application/json}
+      body: '{"query":"query { viewer { login } }"}'
+    expect: allow
+  - name: harmless mutation passes
+    request:
+      method: POST
+      url: https://api.github.com/graphql
+      body: '{"query":"mutation { addComment(input:{subjectId:\"x\",body:\"hi\"}) { clientMutationId } }"}'
+    expect: allow
+  - name: merge is blocked
+    request:
+      method: POST
+      url: https://api.github.com/graphql
+      body: '{"query":"mutation M { mergePullRequest(input:{pullRequestId:\"x\"}) { clientMutationId } }"}'
+    expect: deny
+    expect_reason: mergePullRequest
+  - name: mutation hidden in a fragment is blocked
+    request:
+      method: POST
+      url: https://api.github.com/graphql
+      body: '{"query":"mutation { ...F } fragment F on Mutation { deleteRepository(input:{repositoryId:\"x\"}) { clientMutationId } }"}'
+    expect: deny
+  - name: batched request is checked in full
+    request:
+      method: POST
+      url: https://api.github.com/graphql
+      body: '[{"query":"{ viewer { login } }"},{"query":"mutation { deleteRef(input:{refId:\"x\"}) { clientMutationId } }"}]'
+    expect: deny
+  - name: persisted queries are refused
+    request:
+      method: POST
+      url: https://api.github.com/graphql
+      body: '{"extensions":{"persistedQuery":{"sha256Hash":"abc"}}}'
+    expect: deny
+  - name: REST calls are not this filter's business
+    request: {method: DELETE, url: "https://api.github.com/repos/o/r/issues/comments/1"}
+    expect: allow

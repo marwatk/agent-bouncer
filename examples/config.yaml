@@ -1,0 +1,160 @@
+# agent-bouncer example configuration.
+#
+# Copy to your config dir (`bouncer init` does this) and edit. Paths are
+# relative to this file. The daemon reloads it, and every filter it
+# references, on save; an invalid edit is reported and the previous config
+# stays active.
+
+listen: 127.0.0.1:8228
+ssh_listen: 127.0.0.1:8229
+default_profile: default
+
+approvals:
+  timeout: 2m      # unanswered asks are denied after this
+  notify: true     # desktop notification for each pending approval
+  terminal: true   # prompt in the `bouncer serve` terminal
+  cli: true        # allow `bouncer approve/deny` from another terminal
+
+# Where secrets come from. The agent only ever sees placeholders.
+credentials:
+  gitlab:
+    source: keyring                  # store it with: bouncer cred set gitlab
+    export_env: [GITLAB_TOKEN]       # glab etc. see a placeholder token
+  github:
+    # The escape hatch: any command that prints the secret on stdout.
+    source: command
+    command: [bw, get, password, github-agent-pat]
+    cache: 15m
+    export_env: [GH_TOKEN]
+  gitlab-ssh:
+    source: ssh-agent                # keys from your running ssh-agent
+  sandbox-key:
+    source: file
+    path: ~/.ssh/id_ed25519_sandbox
+  slack:
+    source: env                      # read from the daemon's environment
+    env: SLACK_BOT_TOKEN
+    export_env: [SLACK_TOKEN]
+
+profiles:
+  default:
+    # Hosts without a service below are tunneled untouched (no inspection,
+    # no credentials). Set `unmatched: deny` to block them instead.
+    unmatched: tunnel
+
+    # Profile-wide filters run first for every intercepted request.
+    filters:
+      - filters/redact-response.ts
+
+    services:
+      # "It should have access to only this project using my GitLab
+      # credential; all other APIs should be blocked."
+      - name: gitlab
+        hosts: [gitlab.com]
+        credential: gitlab
+        inject:
+          header: PRIVATE-TOKEN
+          git: {basic: {username: oauth2}}   # git over HTTPS wants Basic auth
+        filters:
+          - path: filters/git-protect-branches.ts
+            config: {branches: [main, "release/*"]}
+          - filters/require-approval-merge.ts
+        # First matching rule wins; with rules present the default is deny.
+        # gitlab_project scopes WHICH project; the deny rules first limit
+        # WHAT the agent may do inside it.
+        rules:
+          - action: deny
+            reason: CI secrets, membership, tokens and webhooks are off-limits
+            gitlab_project:
+              path: mygroup/myproject
+              subpaths: ["variables/**", "members/**", "share/**", "access_tokens/**",
+                         "deploy_tokens/**", "deploy_keys/**", "hooks/**", "transfer", "fork"]
+          - action: deny
+            reason: the agent may not delete, rename or reconfigure the project
+            methods: [PUT, DELETE, POST]
+            gitlab_project: {path: mygroup/myproject, subpaths: ["", "archive", "unarchive"]}
+          - action: allow
+            gitlab_project: mygroup/myproject   # REST API (path or numeric ID) and git
+          - action: allow
+            methods: [GET]
+            path: /api/v4/user                  # tools call this to check auth
+          - action: allow
+            methods: [GET]
+            path: /api/v4/version
+
+      - name: github
+        hosts: [github.com, api.github.com, uploads.github.com]
+        credential: github
+        inject:
+          bearer: true
+          git: {basic: {username: x-access-token}}
+        filters:
+          - filters/github-graphql-guard.ts
+          - filters/require-approval-merge.ts
+          - path: filters/push-rate-limit.ts
+            config: {max: 20, window: 1h}
+        rules:
+          - action: allow
+            github_repo: myorg/myrepo
+          - action: allow
+            methods: [GET]
+            path: /user
+          # `gh` uses GraphQL for most commands. GraphQL isn't scoped by URL,
+          # so this lets the token reach every repo it can access; the
+          # graphql guard above limits what it can do there. Remove this
+          # rule for strict repo scoping (gh will then only partly work).
+          - action: allow
+            methods: [POST]
+            path: /graphql
+
+      # A credential-less service: intercepted only to apply a filter.
+      - name: npm
+        hosts: [registry.npmjs.org]
+        filters: [filters/npm-no-publish.ts]
+
+      - name: slack
+        hosts: [slack.com]
+        credential: slack
+        inject: {bearer: true}
+        filters:
+          - path: filters/slack-channel-allowlist.ts
+            config: {channels: [C0123AGENT]}
+
+    ssh:
+      # git over SSH, with the same branch protection as HTTPS.
+      - name: gitlab-ssh
+        hosts: [gitlab.com]
+        user: git
+        credential: gitlab-ssh
+        allow: [git]
+        filters:
+          - path: filters/git-protect-branches.ts
+            config: {branches: [main, "release/*"]}
+        rules:
+          - action: allow
+            gitlab_project: mygroup/myproject
+
+      # A sandbox VM the agent may log into. Once connected it can do
+      # anything there, so a human approves each session. Agent forwarding
+      # is always refused; port forwards only if `forward` is allowed.
+      - name: sandbox
+        hosts: [sandbox.dev.internal]
+        user: agent
+        credential: sandbox-key
+        allow: [shell, exec, sftp]
+        rules:
+          - action: ask
+            prompt: "Let the agent into sandbox.dev.internal? Once in, it can do anything there."
+
+  # For untrusted repos: nothing leaves except the listed services and
+  # tunnels. Inherits everything from default.
+  locked-down:
+    extends: default
+    unmatched: deny
+    tunnel:
+      - api.anthropic.com     # the agent's own model API
+      - "*.githubusercontent.com"
+    filters:
+      - path: filters/read-only.ts
+        config:
+          except: ["POST /graphql", "POST /-/npm/v1/security/*"]

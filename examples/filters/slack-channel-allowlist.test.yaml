@@ -1,0 +1,29 @@
+filter: slack-channel-allowlist.ts
+filter_config:
+  channels: ["C0AGENTBOT", "#agent-bot"]
+cases:
+  - name: JSON post to the bot channel
+    request:
+      method: POST
+      url: https://slack.com/api/chat.postMessage
+      headers: {Content-Type: application/json; charset=utf-8}
+      body: '{"channel":"C0AGENTBOT","text":"build finished"}'
+    expect: allow
+  - name: form-encoded post elsewhere
+    request:
+      method: POST
+      url: https://slack.com/api/chat.postMessage
+      headers: {Content-Type: application/x-www-form-urlencoded}
+      body: "channel=%23general&text=hello+everyone"
+    expect: deny
+    expect_reason: "#general"
+  - name: reading history is not posting
+    request: {url: "https://slack.com/api/conversations.history?channel=C0OTHER"}
+    expect: allow
+  - name: file share to several channels, one not allowed
+    request:
+      method: POST
+      url: https://slack.com/api/files.completeUploadExternal
+      headers: {Content-Type: application/x-www-form-urlencoded}
+      body: "files=%5B%5D&channels=C0AGENTBOT,C0RANDOM"
+    expect: deny

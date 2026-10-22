@@ -1,0 +1,15 @@
+config: config.yaml
+profile: locked-down
+gitlab_project_ids:
+  mygroup/myproject: 1234
+cases:
+  - name: reads still work
+    request: {url: "https://gitlab.com/api/v4/projects/1234/issues"}
+    expect: allow
+  - name: writes are blocked even in scope
+    request: {method: POST, url: "https://gitlab.com/api/v4/projects/1234/issues", body: "{}"}
+    expect: deny
+    expect_status: 405
+  - name: clone works
+    request: {method: POST, url: "https://gitlab.com/mygroup/myproject.git/git-upload-pack"}
+    expect: allow

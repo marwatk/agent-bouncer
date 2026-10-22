@@ -1,0 +1,19 @@
+filter: redact-response.ts
+filter_config:
+  patterns: ["internal-[0-9]{6}"]
+cases:
+  - name: token in a JSON response is redacted
+    request: {url: "https://gitlab.com/api/v4/projects/1/variables"}
+    upstream:
+      status: 200
+      headers: {Content-Type: application/json}
+      body: '[{"key":"DEPLOY","value":"glpat-abcdefghijklmnopqrstuvwx"},{"key":"ID","value":"internal-123456"}]'
+    expect: allow
+    expect_body_contains: ["[redacted by agent-bouncer]", '"key":"DEPLOY"']
+    expect_body_excludes: ["glpat-", "internal-123456"]
+  - name: binary responses are untouched
+    request: {url: "https://gitlab.com/api/v4/projects/1/repository/archive"}
+    upstream:
+      headers: {Content-Type: application/octet-stream}
+      body: "glpat-abcdefghijklmnopqrstuvwx"
+    expect_body_contains: ["glpat-abcdefghijklmnopqrstuvwx"]

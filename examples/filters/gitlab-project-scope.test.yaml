@@ -1,0 +1,33 @@
+filter: gitlab-project-scope.ts
+filter_config:
+  projects: [mygroup/myproj]
+  ids: {mygroup/myproj: 4242}
+  allow: ["GET /api/v4/user"]
+cases:
+  - name: project by encoded path
+    request: {url: "https://gitlab.com/api/v4/projects/mygroup%2Fmyproj/merge_requests"}
+    expect: allow
+  - name: project by numeric id
+    request: {url: "https://gitlab.com/api/v4/projects/4242/issues", method: POST}
+    expect: allow
+  - name: other project
+    request: {url: "https://gitlab.com/api/v4/projects/mygroup%2Fother"}
+    expect: deny
+  - name: prefix trick
+    request: {url: "https://gitlab.com/api/v4/projects/mygroup%2Fmyproj-evil"}
+    expect: deny
+  - name: listing projects
+    request: {url: "https://gitlab.com/api/v4/projects?search=secret"}
+    expect: deny
+  - name: dot segments are rejected before filters run
+    request: {url: "https://gitlab.com/api/v4/projects/mygroup%2Fmyproj/../../groups"}
+    expect: deny
+  - name: whoami is allowed
+    request: {url: "https://gitlab.com/api/v4/user"}
+    expect: allow
+  - name: git clone of the project
+    request: {url: "https://gitlab.com/mygroup/myproj.git/info/refs?service=git-upload-pack"}
+    expect: allow
+  - name: git clone of another project
+    request: {url: "https://gitlab.com/mygroup/other.git/info/refs?service=git-upload-pack"}
+    expect: deny
