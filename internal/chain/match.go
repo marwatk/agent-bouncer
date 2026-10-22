@@ -1,10 +1,8 @@
 package chain
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"mime"
 	"net/url"
 	"path"
 	"slices"
@@ -164,45 +162,61 @@ func matchGitHubRepo(req *Request, repo string) (bool, error) {
 	return false, nil
 }
 
-var methodOverrideHeaders = []string{"X-Http-Method-Override", "X-Http-Method", "X-Method-Override"}
+var methodOverrideHeaders = []string{"x-http-method-override", "x-http-method", "x-method-override"}
+
+// formLikeTypes are the media types whose bodies Rack parses into params
+// (a missing type counts too).
+var formLikeTypes = map[string]bool{
+	"": true, "application/x-www-form-urlencoded": true,
+	"multipart/form-data": true, "multipart/mixed": true, "multipart/related": true,
+}
 
 // CheckMethodOverride rejects requests that ask the server to treat them as
 // a different method (Rails/Rack, Laravel and others honor these), which
-// would let a POST that policy allowed run as, say, a DELETE.
+// would let a POST that policy allowed run as, say, a DELETE. It errs on the
+// side of refusing: any override-like header name, and any `_method`
+// mention in a form-like POST body.
 func CheckMethodOverride(req *Request) error {
-	for _, h := range methodOverrideHeaders {
-		if req.Header.Get(h) != "" {
-			return fmt.Errorf("method override header %s is not allowed", h)
+	for name := range req.Header {
+		n := strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+		if slices.Contains(methodOverrideHeaders, n) {
+			return fmt.Errorf("method override header %s is not allowed", name)
 		}
 	}
-	if req.URL.Query().Has("_method") {
+	if mentionsMethodParam(req.URL.RawQuery) {
 		return errors.New("_method query parameter is not allowed")
 	}
 	if req.Method != "POST" || req.Body == nil {
 		return nil
 	}
-	ct, _, _ := mime.ParseMediaType(req.Header.Get("Content-Type"))
-	switch ct {
-	case "application/x-www-form-urlencoded":
-		body, err := req.Body.ReadAll()
-		if err != nil {
-			return fmt.Errorf("inspecting form body: %w", err)
-		}
-		form, err := url.ParseQuery(string(body))
-		if err != nil {
-			return fmt.Errorf("unparseable form body: %w", err)
-		}
-		if form.Has("_method") {
-			return errors.New("_method form field is not allowed")
-		}
-	case "multipart/form-data":
-		body, err := req.Body.ReadAll()
-		if err != nil {
-			return fmt.Errorf("inspecting multipart body: %w", err)
-		}
-		if bytes.Contains(body, []byte(`name="_method"`)) || bytes.Contains(body, []byte(`name=_method`)) {
-			return errors.New("_method form field is not allowed")
-		}
+	// Rack takes the media type as everything before the first ; or ,.
+	ct := req.Header.Get("Content-Type")
+	if i := strings.IndexAny(ct, ";,"); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if !formLikeTypes[ct] && !strings.HasPrefix(ct, "multipart/") {
+		return nil
+	}
+	body, err := req.Body.ReadAll()
+	if err != nil {
+		return fmt.Errorf("inspecting form body: %w", err)
+	}
+	if mentionsMethodParam(string(body)) {
+		return errors.New("_method form field is not allowed")
 	}
 	return nil
+}
+
+// mentionsMethodParam reports whether "_method" appears in s in any case,
+// before or after percent-decoding and with escapes removed.
+func mentionsMethodParam(s string) bool {
+	low := strings.ToLower(s)
+	if strings.Contains(low, "_method") || strings.Contains(low, "%5fmethod") {
+		return true
+	}
+	if d, err := url.QueryUnescape(strings.ReplaceAll(low, "\\", "")); err == nil && strings.Contains(d, "_method") {
+		return true
+	}
+	return strings.Contains(strings.ReplaceAll(low, "\\", ""), "_method")
 }
