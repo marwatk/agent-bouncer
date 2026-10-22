@@ -102,6 +102,26 @@ stdout works (Bitwarden, 1Password, `pass`, `security find-generic-password -w`,
 `vault kv get -field=...`). Secrets are cached per `cache` (default 5m).
 `bouncer cred test NAME` fetches a credential without printing it.
 
+**Bulk, at startup (containers, CI, no keyring):**
+
+```sh
+bouncer serve --creds-from <(gen_creds.sh)     # or a file, or - for stdin
+```
+
+```bash
+#!/bin/bash
+# gen_creds.sh: one "name: value" per line; the value is taken verbatim.
+printf 'gitlab: %s\n' "$(rbw get gitlab)"
+printf 'github: %s\n' "$(rbw get github)"
+printf 'deploy-key:: %s\n' "$(base64 < ~/.ssh/deploy_key | tr -d '\n')"   # "::" = base64, for multi-line values
+```
+
+Values are read once and kept only in memory. They override any configured
+source, so one config can use the keyring on your laptop and injected values
+in a container. Mark a credential `source: provided` to require it from
+`--creds-from`. Startup fails on an unknown name, a duplicate, a missing
+`provided` value, or input that looks like a missing `\n`.
+
 **Injection.** `inject:` sets `bearer: true`, `basic: {username}`,
 `header` + `value` (with `{{secret}}`), or `query: param`. `inject.git`
 overrides this for git smart-HTTP, which usually needs Basic auth even when

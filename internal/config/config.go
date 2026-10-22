@@ -84,7 +84,9 @@ func (a Approvals) TimeoutOrDefault() time.Duration {
 // Credential describes where a secret comes from. The agent never sees it;
 // it only sees the placeholder.
 type Credential struct {
-	// Source is one of: keyring, command, env, file, ssh-agent.
+	// Source is one of: keyring, command, env, file, ssh-agent, provided.
+	// "provided" values come from `bouncer serve --creds-from`, which can
+	// also override any other source.
 	Source string `yaml:"source"`
 	// Command (source: command) is an argv run to fetch the secret, e.g.
 	// ["bw", "get", "password", "gitlab"]. Stdout, minus trailing newlines, is the secret.
@@ -376,7 +378,7 @@ func (c *Config) normalize() error {
 		}
 		cr.Name = name
 		switch cr.Source {
-		case "keyring", "ssh-agent":
+		case "keyring", "ssh-agent", "provided":
 		case "command":
 			if len(cr.Command) == 0 {
 				return fmt.Errorf("credential %q: source command requires command", name)
@@ -391,7 +393,7 @@ func (c *Config) normalize() error {
 			}
 			cr.Path = paths.Expand(cr.Path, c.Dir)
 		default:
-			return fmt.Errorf("credential %q: unknown source %q (want keyring, command, env, file, ssh-agent)", name, cr.Source)
+			return fmt.Errorf("credential %q: unknown source %q (want keyring, command, env, file, ssh-agent, provided)", name, cr.Source)
 		}
 	}
 	for name, p := range c.Profiles {
