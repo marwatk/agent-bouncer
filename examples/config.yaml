@@ -35,6 +35,15 @@ credentials:
     source: env                      # read from the daemon's environment
     env: SLACK_BOT_TOKEN
     export_env: [SLACK_TOKEN]
+  # gitlab-bw:
+  #   source: bitwarden              # synced and unlocked for this process
+  #   export_env: [GITLAB_TOKEN]
+  #   bitwarden:
+  #     email: me@example.com
+  #     item: GitLab                 # name or id; folder disambiguates
+  #     field: password              # username, notes, totp, private_key, or a custom field
+  #     # server: https://vault.example.com
+  #     # password_env: BITWARDEN_MASTER_PASSWORD
 
 profiles:
   default:
