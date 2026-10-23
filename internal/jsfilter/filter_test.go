@@ -305,3 +305,88 @@ func TestConcurrentRequestsUseSeparateVMs(t *testing.T) {
 		}
 	}
 }
+
+func sessReq(t *testing.T, id string) *chain.Request {
+	r := req(t, "GET", "https://x/", nil)
+	r.Session = &chain.Session{ID: id}
+	return r
+}
+
+func TestNoCrossSessionStateLeak(t *testing.T) {
+	// A filter that stashes the previous request's session id in a module
+	// variable must never reveal session A's data to session B.
+	f := load(t, `import { respond } from "bouncer"; let last = "none";
+export default { onRequest(req) { const p = last; last = req.session.id; return respond(200, p); } };`, Options{})
+	h := chain.Build([]chain.Filter{f}, upstream("ok"))
+	for i := 0; i < 5; i++ {
+		resp, _ := h(sessReq(t, "session-A"))
+		b, _ := io.ReadAll(resp.Body.Reader())
+		if string(b) == "session-A" {
+			continue // A seeing its own prior value is fine
+		}
+	}
+	resp, _ := h(sessReq(t, "session-B"))
+	b, _ := io.ReadAll(resp.Body.Reader())
+	if string(b) == "session-A" {
+		t.Fatalf("session B saw session A's state: %q", b)
+	}
+}
+
+func TestStaleNextCannotForward(t *testing.T) {
+	// A filter that saves next() during a denied request and calls it on a
+	// later request must not forward the earlier request upstream.
+	var forwarded int
+	term := func(*chain.Request) (*chain.Response, error) {
+		forwarded++
+		return &chain.Response{Status: 200}, nil
+	}
+	f := load(t, `import { deny } from "bouncer"; let saved = null;
+export default { async onRequest(req, next) {
+  if (!saved) { saved = next; return deny("first"); }
+  try { await saved(req); } catch (e) { return deny("stale: " + e); }
+  return deny("second");
+} };`, Options{})
+	h := chain.Build([]chain.Filter{f}, term)
+	h(sessReq(t, "s1"))
+	resp, _ := h(sessReq(t, "s1"))
+	if forwarded != 0 {
+		t.Fatalf("stale next() forwarded %d requests upstream", forwarded)
+	}
+	if resp.Denial == nil || !strings.Contains(resp.Denial.Reason, "stale") {
+		t.Fatalf("expected stale-next denial, got %+v", resp.Denial)
+	}
+}
+
+func TestSpinningTopLevelIsBounded(t *testing.T) {
+	// A filter whose module top level never finishes must not hang; it's
+	// bounded by the CPU budget and fails to load.
+	dir := t.TempDir()
+	p := writeFilter(t, dir, "spin.ts", `const t0 = Date.now(); while (Date.now() - t0 < 5000) {}
+export default { onRequest(req, next) { return next(req); } };`)
+	start := time.Now()
+	_, err := Load(Options{Path: p, Timeout: 100 * time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "top-level") {
+		t.Fatalf("expected a top-level budget error, got %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("top-level spin was not interrupted near the budget")
+	}
+}
+
+func TestFastAskLoopHitsBudget(t *testing.T) {
+	env := &chain.Env{Approver: approver(func(chain.AskRequest) bool { return true })}
+	f := load(t, `import { ask } from "bouncer";
+export default { async onRequest(req, next) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 5000) { await ask("x"); for (let j = 0; j < 50; j++) {} }
+  return next(req);
+} };`, Options{Timeout: 50 * time.Millisecond, Env: env})
+	start := time.Now()
+	resp, _ := chain.Build([]chain.Filter{f}, upstream("ok"))(req(t, "GET", "https://x/", nil))
+	if resp.Denial == nil {
+		t.Fatal("fast ask() loop was allowed")
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("ask() loop ran %v past a 50ms budget", time.Since(start))
+	}
+}

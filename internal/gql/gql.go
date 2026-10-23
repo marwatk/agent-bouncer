@@ -80,12 +80,29 @@ func collect(set ast.SelectionSet, frags ast.FragmentDefinitionList, visiting, s
 // FromHTTP extracts and summarizes the GraphQL operations in an HTTP request.
 // It returns (nil, nil) if the request does not carry a GraphQL query.
 func FromHTTP(method string, query url.Values, header http.Header, body []byte) ([]Operation, error) {
-	if method == http.MethodGet {
-		q := query.Get("query")
-		if q == "" {
-			return nil, nil
+	// A query in the URL is run by servers (GitLab, GitHub) on any method,
+	// so inspect it whatever the method is. Ambiguity (more than one value)
+	// fails closed.
+	if qs, ok := query["query"]; ok {
+		if len(qs) != 1 {
+			return nil, errors.New("graphql: query given more than once in the URL")
 		}
-		return Summarize(q)
+		urlOps, err := Summarize(qs[0])
+		if err != nil {
+			return nil, err
+		}
+		bodyOps, err := fromBody(method, header, body)
+		if err != nil {
+			return nil, err
+		}
+		return append(urlOps, bodyOps...), nil
+	}
+	return fromBody(method, header, body)
+}
+
+func fromBody(method string, header http.Header, body []byte) ([]Operation, error) {
+	if method == http.MethodGet {
+		return nil, nil
 	}
 	ct, _, _ := mime.ParseMediaType(header.Get("Content-Type"))
 	if ct == "application/graphql" {
@@ -95,31 +112,26 @@ func FromHTTP(method string, query url.Values, header http.Header, body []byte) 
 	if trimmed == "" {
 		return nil, nil
 	}
-	type payload struct {
-		Query string `json:"query"`
-	}
-	if err := noDuplicateKeys(body); err != nil {
+	if err := checkKeys(body); err != nil {
 		return nil, err
 	}
-	var docs []payload
+	// Decode into RawMessage maps so a case-variant key (QUERY) can't shadow
+	// the real one and so the GitLab _json multiplex key is seen.
+	var objs []map[string]json.RawMessage
 	if strings.HasPrefix(trimmed, "[") {
-		if err := json.Unmarshal(body, &docs); err != nil {
+		if err := json.Unmarshal(body, &objs); err != nil {
 			return nil, fmt.Errorf("graphql: batch body: %w", err)
 		}
 	} else {
-		var p payload
-		if err := json.Unmarshal(body, &p); err != nil {
+		var o map[string]json.RawMessage
+		if err := json.Unmarshal(body, &o); err != nil {
 			return nil, fmt.Errorf("graphql: body: %w", err)
 		}
-		docs = []payload{p}
+		objs = []map[string]json.RawMessage{o}
 	}
 	var all []Operation
-	for _, d := range docs {
-		if d.Query == "" {
-			// Persisted queries (hash only) can't be inspected.
-			return nil, errors.New("graphql: request has no query text (persisted query?)")
-		}
-		ops, err := Summarize(d.Query)
+	for _, o := range objs {
+		ops, err := opsFromObject(o)
 		if err != nil {
 			return nil, err
 		}
@@ -128,10 +140,42 @@ func FromHTTP(method string, query url.Values, header http.Header, body []byte) 
 	return all, nil
 }
 
-// noDuplicateKeys rejects a request object (or batch of them) that repeats a
-// top-level key. JSON parsers disagree on which duplicate wins, so the
-// operation bouncer inspects could differ from the one the server runs.
-func noDuplicateKeys(body []byte) error {
+// opsFromObject extracts operations from one GraphQL request object,
+// including a GitLab `_json` multiplex array.
+func opsFromObject(o map[string]json.RawMessage) ([]Operation, error) {
+	if raw, ok := o["_json"]; ok {
+		var batch []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &batch); err != nil {
+			return nil, fmt.Errorf("graphql: _json: %w", err)
+		}
+		var all []Operation
+		for _, e := range batch {
+			ops, err := opsFromObject(e)
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, ops...)
+		}
+		return all, nil
+	}
+	raw, ok := o["query"]
+	if !ok {
+		return nil, errors.New("graphql: request has no query text (persisted query?)")
+	}
+	var q string
+	if err := json.Unmarshal(raw, &q); err != nil {
+		return nil, fmt.Errorf("graphql: query: %w", err)
+	}
+	if q == "" {
+		return nil, errors.New("graphql: request has no query text (persisted query?)")
+	}
+	return Summarize(q)
+}
+
+// checkKeys rejects a request object (or batch of them) whose top-level keys
+// collide case-insensitively. JSON parsers disagree on which wins, so a
+// QUERY key could shadow the query bouncer inspects.
+func checkKeys(body []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	tok, err := dec.Token()
 	if err != nil {
@@ -145,10 +189,11 @@ func noDuplicateKeys(body []byte) error {
 				return fmt.Errorf("graphql: body: %w", err)
 			}
 			k, _ := kt.(string)
-			if seen[k] {
+			lk := strings.ToLower(k)
+			if seen[lk] {
 				return fmt.Errorf("graphql: duplicate %q key in request body", k)
 			}
-			seen[k] = true
+			seen[lk] = true
 			var skip json.RawMessage
 			if err := dec.Decode(&skip); err != nil {
 				return fmt.Errorf("graphql: body: %w", err)

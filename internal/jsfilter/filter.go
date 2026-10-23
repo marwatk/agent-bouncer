@@ -36,9 +36,17 @@ type Filter struct {
 	name  string
 	opts  Options
 	prog  *goja.Program
-	pool  chan *instance
 	hooks struct{ request, response, ssh bool }
+
+	// VMs are pooled per session so module-level state and globals from one
+	// session's request can't be read by another's. A bounded number of
+	// session pools is kept; evicting one only discards cached VMs.
+	mu    sync.Mutex
+	pools map[string]chan *instance
+	order []string
 }
+
+const maxSessionPools = 64
 
 // Load bundles, compiles and validates a filter.
 func Load(opts Options) (*Filter, error) {
@@ -56,7 +64,7 @@ func Load(opts Options) (*Filter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", opts.Path, err)
 	}
-	f := &Filter{opts: opts, prog: prog, pool: make(chan *instance, poolSize)}
+	f := &Filter{opts: opts, prog: prog, pools: map[string]chan *instance{}}
 	f.name = strings.TrimSuffix(filepath.Base(opts.Path), filepath.Ext(opts.Path))
 	inst, err := f.newInstance()
 	if err != nil {
@@ -71,7 +79,7 @@ func Load(opts Options) (*Filter, error) {
 	if !f.hooks.request && !f.hooks.response && !f.hooks.ssh {
 		return nil, fmt.Errorf("%s: filter defines none of onRequest, onResponse, onSSH", opts.Path)
 	}
-	f.put(inst)
+	// inst was only a validation probe; let it be collected.
 	return f, nil
 }
 
@@ -91,7 +99,8 @@ func (f *Filter) Handle(req *chain.Request, next chain.Handler) (*chain.Response
 			return next(req)
 		}
 	}
-	inst, err := f.get()
+	sid := sessionKey(req)
+	inst, err := f.get(sid)
 	if err != nil {
 		return nil, err
 	}
@@ -99,22 +108,48 @@ func (f *Filter) Handle(req *chain.Request, next chain.Handler) (*chain.Response
 	if inst.broken {
 		return resp, err
 	}
-	f.put(inst)
+	f.put(sid, inst)
 	return resp, err
 }
 
-func (f *Filter) get() (*instance, error) {
-	select {
-	case i := <-f.pool:
-		return i, nil
-	default:
-		return f.newInstance()
+func sessionKey(req *chain.Request) string {
+	if req.Session != nil {
+		return req.Session.ID
 	}
+	return ""
 }
 
-func (f *Filter) put(i *instance) {
+func (f *Filter) get(sid string) (*instance, error) {
+	f.mu.Lock()
+	pool := f.pools[sid]
+	f.mu.Unlock()
+	if pool != nil {
+		select {
+		case i := <-pool:
+			return i, nil
+		default:
+		}
+	}
+	return f.newInstance()
+}
+
+func (f *Filter) put(sid string, i *instance) {
+	f.mu.Lock()
+	pool := f.pools[sid]
+	if pool == nil {
+		pool = make(chan *instance, poolSize)
+		f.pools[sid] = pool
+		f.order = append(f.order, sid)
+		// Bound the number of session pools; dropping one just discards its
+		// cached VMs.
+		for len(f.order) > maxSessionPools {
+			delete(f.pools, f.order[0])
+			f.order = f.order[1:]
+		}
+	}
+	f.mu.Unlock()
 	select {
-	case f.pool <- i:
+	case pool <- i:
 	default:
 	}
 }
@@ -135,7 +170,14 @@ type instance struct {
 
 	// cur is the request being handled; host functions consult it.
 	cur *chain.Request
+	// gen rises each run. Host closures capture it and refuse to act once
+	// it has moved on, so a filter can't stash next()/body and reuse them on
+	// a later (possibly different-session) request.
+	gen uint64
 }
+
+// live reports whether a closure created in generation gen may still act.
+func (i *instance) live(gen uint64) bool { return i.gen == gen && i.cur != nil }
 
 func (f *Filter) newInstance() (*instance, error) {
 	vm := goja.New()
@@ -145,7 +187,17 @@ func (f *Filter) newInstance() (*instance, error) {
 	if err := inst.installHost(); err != nil {
 		return nil, err
 	}
-	if _, err := vm.RunProgram(f.prog); err != nil {
+	// Module top-level code runs under the CPU budget too, so a filter whose
+	// top level loops can't run unbounded when a new VM is created.
+	inst.wd.start(f.opts.Timeout)
+	_, err := vm.RunProgram(f.prog)
+	inst.wd.stop()
+	vm.ClearInterrupt()
+	if err != nil {
+		var ie *goja.InterruptedError
+		if errors.As(err, &ie) {
+			return nil, fmt.Errorf("filter top-level code exceeded %s CPU budget", f.opts.Timeout)
+		}
 		return nil, err
 	}
 	mod := vm.Get(globalName)
@@ -178,6 +230,7 @@ func (f *Filter) newInstance() (*instance, error) {
 // run invokes the filter's hooks for one request.
 func (i *instance) run(req *chain.Request, next chain.Handler) (resp *chain.Response, err error) {
 	i.cur = req
+	i.gen++
 	i.vm.ClearInterrupt()
 	i.wd.start(i.f.opts.Timeout)
 	defer func() {
@@ -327,8 +380,14 @@ func (w *watchdog) resume() {
 	defer w.mu.Unlock()
 	w.paused--
 	if w.paused == 0 {
+		// The budget is already spent; don't hand back a fresh slice, or a
+		// loop of fast host calls would never be interrupted.
+		if w.remaining <= 0 {
+			go w.fire()
+			return
+		}
 		w.started = time.Now()
-		w.timer = time.AfterFunc(max(w.remaining, time.Millisecond), w.fire)
+		w.timer = time.AfterFunc(w.remaining, w.fire)
 	}
 }
 

@@ -9,6 +9,9 @@ func TestHostMatches(t *testing.T) {
 		want bool
 	}{
 		{[]string{"gitlab.com"}, "gitlab.com", true},
+		{[]string{"kube.example.com"}, "Kube.example.com:443", true},
+		{[]string{"kube.example.com"}, "Åube.example.com", false},
+		{[]string{"gitlab.com"}, "GITLAB.COM", true},
 		{[]string{"gitlab.com"}, "GitLab.com:443", true},
 		{[]string{"gitlab.com"}, "evilgitlab.com", false},
 		{[]string{"*.github.com"}, "api.github.com", true},
@@ -19,6 +22,9 @@ func TestHostMatches(t *testing.T) {
 		{[]string{"gitlab.com"}, "gitlab.com:80", false},
 		{[]string{"gitlab.com"}, "gitlab.com:8443", false},
 		{[]string{"gitlab.com"}, "gitlab.com", true},
+		{[]string{"kube.example.com"}, "Kube.example.com:443", true},
+		{[]string{"kube.example.com"}, "Åube.example.com", false},
+		{[]string{"gitlab.com"}, "GITLAB.COM", true},
 	}
 	for _, c := range cases {
 		if got := HostMatches(c.pats, c.host); got != c.want {

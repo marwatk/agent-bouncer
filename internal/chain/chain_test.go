@@ -286,17 +286,37 @@ func TestCheckMethodOverride(t *testing.T) {
 	hdr := httpReq(t, "POST", "https://gitlab.com/x", nil)
 	hdr.Header.Set("X-HTTP-Method-Override", "DELETE")
 	multi := httpReq(t, "POST", "https://gitlab.com/x", []byte("--b\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nDELETE\r\n--b--"))
-	multi.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+	multi.Header.Set("Content-Type", "multipart/mixed; boundary=b")
 	for name, c := range map[string]struct {
 		req *Request
 		ok  bool
 	}{
-		"header":     {hdr, false},
-		"query":      {httpReq(t, "POST", "https://gitlab.com/x?_method=DELETE", nil), false},
-		"form":       {form("a=1&_method=DELETE"), false},
-		"multipart":  {multi, false},
-		"plain form": {form("title=hello&description=_method"), true},
-		"json":       {httpReq(t, "POST", "https://gitlab.com/x", []byte(`{"_method":"DELETE"}`)), true},
+		"header":    {hdr, false},
+		"query":     {httpReq(t, "POST", "https://gitlab.com/x?_method=DELETE", nil), false},
+		"form":      {form("a=1&_method=DELETE"), false},
+		"multipart": {multi, false},
+		"no content type": {func() *Request {
+			r := httpReq(t, "POST", "https://gitlab.com/x", []byte("_method=DELETE"))
+			return r
+		}(), false},
+		"odd content type": {func() *Request {
+			r := form("_method=DELETE")
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded, text/plain")
+			return r
+		}(), false},
+		"bracketed key": {form("%5B_method%5D=DELETE"), false},
+		"encoded key":   {form("%5Fmethod=DELETE"), false},
+		"underscore header": {func() *Request {
+			r := httpReq(t, "POST", "https://gitlab.com/x", nil)
+			r.Header["X_http_method_override"] = []string{"DELETE"}
+			return r
+		}(), false},
+		"plain form": {form("title=hello&description=world"), true},
+		"json": {func() *Request {
+			r := httpReq(t, "POST", "https://gitlab.com/x", []byte(`{"_method":"DELETE"}`))
+			r.Header.Set("Content-Type", "application/json")
+			return r
+		}(), true},
 	} {
 		if got := CheckMethodOverride(c.req) == nil; got != c.ok {
 			t.Errorf("%s: ok=%v want %v", name, got, c.ok)

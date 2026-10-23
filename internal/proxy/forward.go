@@ -22,6 +22,7 @@ func (s *Server) forwarder(svc *policy.Service, origLength int64) chain.Handler 
 		// so response filters always see plain bodies.
 		header.Del("Accept-Encoding")
 		u := *req.URL
+		var injectedSecret string
 		if name := svc.Config.Credential; name != "" {
 			if header.Get("Upgrade") != "" && !svc.Config.AllowUpgrade {
 				return synthetic(http.StatusForbidden, "agent-bouncer: protocol upgrades on "+svc.Config.Name+" are not allowed (the upgraded stream can't be filtered); set allow_upgrade: true to permit"), nil
@@ -36,7 +37,11 @@ func (s *Server) forwarder(svc *policy.Service, origLength int64) chain.Handler 
 				s.logf("credential for service %s: %v", svc.Config.Name, err)
 				return synthetic(http.StatusBadGateway, "agent-bouncer: credential for "+svc.Config.Name+" is unavailable; see the bouncer log"), nil
 			}
-			Inject(header, &u, name, svc.Config.Inject.For(req.Git() != nil), secret)
+			spec := svc.Config.Inject.For(req.Git() != nil)
+			Inject(header, &u, name, spec, secret)
+			if spec != nil && spec.Query != "" {
+				injectedSecret = secret
+			}
 		}
 
 		length := req.Body.Len()
@@ -59,8 +64,20 @@ func (s *Server) forwarder(svc *policy.Service, origLength int64) chain.Handler 
 		if err != nil {
 			return synthetic(http.StatusBadGateway, "agent-bouncer: upstream error: "+err.Error()), nil
 		}
+		// A query-injected secret can come back in a URL the upstream echoes
+		// (a redirect Location, say), which the agent would then read. Scrub it.
+		if injectedSecret != "" {
+			scrubSecret(resp.Header, injectedSecret)
+		}
 		r := &chain.Response{Status: resp.StatusCode, Header: resp.Header}
 		if resp.StatusCode == http.StatusSwitchingProtocols {
+			// Only splice a 101 if the client actually asked to upgrade and
+			// the service permits it; otherwise an upstream could hand the
+			// agent a raw stream on a request that was never meant to upgrade.
+			if header.Get("Upgrade") == "" || (svc.Config.Credential != "" && !svc.Config.AllowUpgrade) {
+				resp.Body.Close()
+				return synthetic(http.StatusBadGateway, "agent-bouncer: unexpected protocol upgrade from upstream"), nil
+			}
 			if rwc, ok := resp.Body.(io.ReadWriteCloser); ok {
 				r.Upgrade = rwc
 				return r, nil
@@ -68,6 +85,23 @@ func (s *Server) forwarder(svc *policy.Service, origLength int64) chain.Handler 
 		}
 		r.Body = chain.NewBody(resp.Body)
 		return r, nil
+	}
+}
+
+// scrubSecret removes a secret (raw, percent-encoded, or base64) from
+// response headers that commonly carry a URL back to the client.
+func scrubSecret(h http.Header, secret string) {
+	forms := []string{secret, url.QueryEscape(secret), base64.StdEncoding.EncodeToString([]byte(secret))}
+	for _, name := range []string{"Location", "Content-Location", "Link", "Refresh"} {
+		vs := h.Values(name)
+		for i, v := range vs {
+			for _, f := range forms {
+				if f != "" && strings.Contains(v, f) {
+					v = strings.ReplaceAll(v, f, "REDACTED-BY-AGENT-BOUNCER")
+				}
+			}
+			vs[i] = v
+		}
 	}
 }
 
@@ -115,9 +149,15 @@ func Inject(h http.Header, u *url.URL, credName string, spec *config.Inject, sec
 		h.Set(spec.Header, strings.ReplaceAll(v, "{{secret}}", secret))
 	}
 	if spec.Query != "" {
-		q := u.Query()
-		q.Set(spec.Query, secret)
-		u.RawQuery = q.Encode()
+		// Append rather than re-encode: url.Values.Encode() drops malformed
+		// pairs and reorders the rest, so the forwarded query would differ
+		// from the one the rules evaluated.
+		pair := url.QueryEscape(spec.Query) + "=" + url.QueryEscape(secret)
+		if u.RawQuery == "" {
+			u.RawQuery = pair
+		} else {
+			u.RawQuery += "&" + pair
+		}
 	}
 }
 

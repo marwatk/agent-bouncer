@@ -43,6 +43,7 @@ type env struct {
 	client   *http.Client
 	audit    []audit.Entry
 	port     string
+	backend  *fakeBackend
 }
 
 func setup(t *testing.T, profileYAML string) *env {
@@ -55,6 +56,11 @@ func setup(t *testing.T, profileYAML string) *env {
 			buf.Flush()
 			io.Copy(conn, buf)
 			conn.Close()
+			return
+		}
+		if r.URL.Path == "/redirect" {
+			// Echo the URL (query included) back to the client.
+			http.Redirect(w, r, "/new?"+r.URL.RawQuery, http.StatusMovedPermanently)
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
@@ -85,8 +91,9 @@ profiles:
 	tr := NewTransport()
 	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	log, _ := audit.Open("", func(en audit.Entry) { e.audit = append(e.audit, en) })
+	e.backend = &fakeBackend{set: set, sessions: map[string]*chain.Session{"tok123": {ID: "s1", Profile: "p"}}}
 	srv := &Server{
-		Backend:   &fakeBackend{set: set, sessions: map[string]*chain.Session{"tok123": {ID: "s1", Profile: "p"}}},
+		Backend:   e.backend,
 		CA:        authority,
 		Creds:     creds.NewStore(cfg.Credentials),
 		Audit:     log,
@@ -318,6 +325,23 @@ func TestUpgradeRefusedOnCredentialedService(t *testing.T) {
 	}
 }
 
+func TestUnexpectedUpstreamUpgradeRefused(t *testing.T) {
+	// The upstream answers a plain request with 101; without a client
+	// upgrade on a credentialed service, bouncer must not splice it.
+	e := setup(t, `
+  p:
+    services:
+      - name: api
+        hosts: [localhost]
+        credential: tok
+        allow_upgrade: true
+`)
+	status, _ := e.get(t, "GET", "https://localhost:"+e.port+"/upgrade", nil)
+	if status == http.StatusSwitchingProtocols {
+		t.Fatalf("spliced an unrequested upgrade: %d", status)
+	}
+}
+
 func TestUpgradePassthrough(t *testing.T) {
 	e := setup(t, `
   p:
@@ -343,4 +367,45 @@ func TestUpgradePassthrough(t *testing.T) {
 		t.Fatalf("echo: %q", buf)
 	}
 	rwc.Close()
+}
+
+func TestInjectQueryPreservesAndScrubs(t *testing.T) {
+	e := setup(t, `
+  p:
+    services:
+      - name: api
+        hosts: [localhost]
+        credential: tok
+        inject: {query: api_key}
+`)
+	// Malformed-but-forwarded pairs survive unmangled, secret appended.
+	_, body := e.get(t, "GET", "https://localhost:"+e.port+"/x?a=1;b=2&q=%2B", nil)
+	if !strings.Contains(body, "query=a=1;b=2&q=%2B&api_key=real-secret") {
+		t.Fatalf("query mangled: %s", body)
+	}
+	// A redirect that echoes the URL must not leak the secret.
+	req, _ := http.NewRequest("GET", "https://localhost:"+e.port+"/redirect?a=1", nil)
+	e.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := e.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if loc := resp.Header.Get("Location"); strings.Contains(loc, "real-secret") {
+		t.Fatalf("secret leaked in Location: %q", loc)
+	}
+}
+
+func TestRevocationReachesLiveTunnel(t *testing.T) {
+	e := setup(t, scopedProfile)
+	base := "https://localhost:" + e.port
+	// First request over the keep-alive tunnel succeeds.
+	if status, _ := e.get(t, "GET", base+"/api/v4/projects/group%2Fproj", nil); status != 200 {
+		t.Fatalf("first request: %d", status)
+	}
+	// Revoke the session; the already-open tunnel must stop serving.
+	delete(e.backend.sessions, "tok123")
+	if status, _ := e.get(t, "GET", base+"/api/v4/projects/group%2Fproj", nil); status != http.StatusProxyAuthRequired {
+		t.Fatalf("after revocation the tunnel still served: %d", status)
+	}
 }
