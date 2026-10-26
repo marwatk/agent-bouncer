@@ -85,7 +85,7 @@ func (a Approvals) TimeoutOrDefault() time.Duration {
 // Credential describes where a secret comes from. The agent never sees it;
 // it only sees the placeholder.
 type Credential struct {
-	// Source is one of: keyring, command, env, file, ssh-agent, provided.
+	// Source is one of: keyring, command, env, file, ssh-agent, bitwarden, provided.
 	// "provided" values come from `bouncer serve --creds-from`, which can
 	// also override any other source.
 	Source string `yaml:"source"`
@@ -100,6 +100,9 @@ type Credential struct {
 	Account string `yaml:"account"`
 	// Fingerprint (source: ssh-agent) selects a key from the agent by SHA256 fingerprint.
 	Fingerprint string `yaml:"fingerprint"`
+	// Bitwarden (source: bitwarden) selects an item in a vault. The vault is
+	// synced and unlocked once, and stays unlocked for the life of the process.
+	Bitwarden *Bitwarden `yaml:"bitwarden"`
 	// Cache controls how long a fetched secret is kept in memory. Default 5m; 0s disables.
 	Cache *Duration `yaml:"cache"`
 	// ExportEnv lists environment variables `bouncer env` sets to this
@@ -107,6 +110,27 @@ type Credential struct {
 	ExportEnv []string `yaml:"export_env"`
 
 	Name string `yaml:"-"`
+}
+
+// Bitwarden selects a field in a Bitwarden vault. Several credentials can
+// share one vault; the master password is requested once per email and server.
+type Bitwarden struct {
+	// Email is the Bitwarden account.
+	Email string `yaml:"email"`
+	// Server is the vault base URL. Empty means bitwarden.com. A self-hosted
+	// server is the URL you open in a browser, for example https://vault.example.com.
+	Server string `yaml:"server"`
+	// Item is the item's name or id.
+	Item string `yaml:"item"`
+	// Folder disambiguates items that share a name.
+	Folder string `yaml:"folder"`
+	// Field is password (default), username, notes, totp, private_key,
+	// public_key, fingerprint, or the name of a custom field.
+	// totp is the stored secret, not a live code.
+	Field string `yaml:"field"`
+	// PasswordEnv names an environment variable holding the master password.
+	// When empty, `bouncer serve` prompts for it at startup.
+	PasswordEnv string `yaml:"password_env"`
 }
 
 // Placeholder is the stand-in value the agent uses in place of the secret.
@@ -410,6 +434,9 @@ func (c *Config) normalize() error {
 			return fmt.Errorf("credential %q: empty", name)
 		}
 		cr.Name = name
+		if cr.Bitwarden != nil && cr.Source != "bitwarden" {
+			return fmt.Errorf("credential %q: bitwarden block requires source bitwarden", name)
+		}
 		switch cr.Source {
 		case "keyring", "ssh-agent", "provided":
 		case "command":
@@ -425,8 +452,15 @@ func (c *Config) normalize() error {
 				return fmt.Errorf("credential %q: source file requires path", name)
 			}
 			cr.Path = paths.Expand(cr.Path, c.Dir)
+		case "bitwarden":
+			if cr.Bitwarden == nil || strings.TrimSpace(cr.Bitwarden.Email) == "" || strings.TrimSpace(cr.Bitwarden.Item) == "" {
+				return fmt.Errorf("credential %q: source bitwarden requires bitwarden.email and bitwarden.item", name)
+			}
+			if cr.Bitwarden.Field == "" {
+				cr.Bitwarden.Field = "password"
+			}
 		default:
-			return fmt.Errorf("credential %q: unknown source %q (want keyring, command, env, file, ssh-agent, provided)", name, cr.Source)
+			return fmt.Errorf("credential %q: unknown source %q (want keyring, command, env, file, ssh-agent, bitwarden, provided)", name, cr.Source)
 		}
 	}
 	for name, p := range c.Profiles {

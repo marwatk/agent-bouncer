@@ -88,9 +88,14 @@ smuggle a placeholder into a field the API stores and echoes back (an issue
 title, say) and read the real secret out of the response.
 
 Sources are keyring (go-keyring: Keychain, Credential Manager, Secret
-Service), `command` (the escape hatch for any password manager CLI), `env`,
-`file` and `ssh-agent`. Concurrent fetches of one credential are serialized,
-so an interactive unlock prompt appears once.
+Service), `bitwarden` (sync a vault and unlock it for the life of the
+process; see `internal/creds/bitwarden`), `provided` (`bouncer serve
+--creds-from`, which can also override any other source), `command` (the
+escape hatch for any password manager CLI), `env`, `file` and `ssh-agent`.
+Concurrent fetches
+of one credential are serialized, so an interactive unlock prompt appears
+once. Bitwarden accounts are unlocked up front, when the daemon loads
+config, so the prompt does not race the approval prompt.
 
 ## Transports
 

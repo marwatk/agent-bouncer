@@ -2,6 +2,8 @@ package creds
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -49,5 +51,20 @@ func TestEnvSource(t *testing.T) {
 	s := NewStore(map[string]*config.Credential{"e": {Name: "e", Source: "env", Env: "BOUNCER_TEST_SECRET"}})
 	if v, err := s.Get(context.Background(), "e"); err != nil || v != "s3cret" {
 		t.Fatalf("got %q, %v", v, err)
+	}
+}
+
+func TestBitwardenSourceWrapsErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	ConfigureBitwarden(t.TempDir(), nil)
+	s := NewStore(map[string]*config.Credential{"bw": {Name: "bw", Source: "bitwarden", Bitwarden: &config.Bitwarden{
+		Email: "user@example.com", Server: srv.URL, Item: "GitLab",
+	}}})
+	_, err := s.Get(context.Background(), "bw")
+	if err == nil || !strings.Contains(err.Error(), `credential "bw"`) || !strings.Contains(err.Error(), "prelogin") {
+		t.Fatalf("err = %v", err)
 	}
 }

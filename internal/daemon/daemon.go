@@ -151,6 +151,7 @@ func New(opts Options) (*Daemon, error) {
 			}
 		},
 	}
+	creds.ConfigureBitwarden(opts.StateDir, opts.Logf)
 	d.creds = creds.NewStore(cfg.Credentials)
 	d.creds.SetProvided(opts.Provided)
 	if err := d.apply(cfg); err != nil {
@@ -208,6 +209,11 @@ func (d *Daemon) apply(cfg *config.Config) error {
 	}
 	set, err := policy.Compile(cfg, d.env, d.kv)
 	if err != nil {
+		return err
+	}
+	// Unlock Bitwarden vaults before swapping the credential set in, so a
+	// bad master password leaves the previous config running.
+	if err := d.creds.Prepare(context.Background(), cfg.Credentials); err != nil {
 		return err
 	}
 	d.creds.Update(cfg.Credentials)

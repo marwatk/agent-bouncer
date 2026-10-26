@@ -95,10 +95,29 @@ credentials:
   ci:       {source: env, env: CI_TOKEN}                        # the daemon's environment
   sandbox:  {source: file, path: ~/.ssh/id_ed25519_sandbox}     # SSH keys must be unencrypted...
   gitlab-ssh: {source: ssh-agent, fingerprint: "SHA256:..."}    # ...or come from your ssh-agent
+  gitlab-bw:
+    source: bitwarden
+    bitwarden:
+      email: me@example.com
+      item: GitLab                      # name or id
+      field: password                   # or username, notes, totp, private_key, or a custom field
+      # folder: Work                    # when several items share a name
+      # server: https://vault.example.com   # self-hosted; omit for bitwarden.com
+      # password_env: BITWARDEN_MASTER_PASSWORD
 ```
 
+`source: bitwarden` logs in to the vault, syncs it, and unlocks it for the
+life of the bouncer process. `bouncer serve` asks for the master password
+once at startup (or reads `password_env`); every credential that names the
+same email and server shares that unlock. A device id and refresh token are
+stored in the state directory so the next start usually skips two-factor,
+but the master password is required again and the decrypted vault is never
+written to disk. `field: totp` is the stored secret, not a live code.
+Authenticator codes, YubiKey OTPs, and email codes are accepted when the
+server asks for a second factor.
+
 The `command` source is the escape hatch: anything that prints the secret on
-stdout works (Bitwarden, 1Password, `pass`, `security find-generic-password -w`,
+stdout works (the Bitwarden CLI, 1Password, `pass`, `security find-generic-password -w`,
 `vault kv get -field=...`). Secrets are cached per `cache` (default 5m).
 `bouncer cred test NAME` fetches a credential without printing it.
 
